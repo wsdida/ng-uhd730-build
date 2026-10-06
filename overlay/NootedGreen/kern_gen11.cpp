@@ -1421,14 +1421,24 @@ bool Gen11::processKext(KernelPatcher &patcher, size_t index, mach_vm_address_t 
 				}
 
 				// RPL-only: hardcode topology and bypass BCS readiness check
-				LookupPatchPlus const patchesRPL[] = {
-					{activeKext, f3b, r3b, arrsize(f3b),	1},      // L3BankCount=8
-					{activeKext, f3bb, r3bb, arrsize(f3bb),	1},    // MaxEU/SS=8
-					{activeKext, f3bbb, r3bbb, arrsize(f3bbb),	1},// NumSubSlices
-					{activeKext, f_devstart, m_devstart, r_devstart, rm_devstart, arrsize(f_devstart), 1}, // BCS bypass
-				};
-				PANIC_COND(!LookupPatchPlus::applyAll(patcher, patchesRPL, address, size), "ngreen",
-					"kextG11HWT Failed to apply RPL-specific patches!");
+				// VLOCAL5 (wsdida GT1): apply each patch individually and LOG instead of
+				// PANIC_COND — one missing pattern must not kill the whole load.
+				{
+					struct RPLEntry { const char *name; LookupPatchPlus patch; };
+					const RPLEntry rplPatches[] = {
+						{"L3BankCount=8",   {activeKext, f3b, r3b, arrsize(f3b), 1}},
+						{"MaxEU/SS=8",      {activeKext, f3bb, r3bb, arrsize(f3bb), 1}},
+						{"NumSubSlices",    {activeKext, f3bbb, r3bbb, arrsize(f3bbb), 1}},
+						{"BCS-bypass",      {activeKext, f_devstart, m_devstart, r_devstart, rm_devstart, arrsize(f_devstart), 1}},
+					};
+					for (const auto &e : rplPatches) {
+						LookupPatchPlus const one[] = {e.patch};
+						if (LookupPatchPlus::applyAll(patcher, one, address, size))
+							SYSLOG("ngreen", "VLOCAL5: RPL patch '%s' applied OK", e.name);
+						else
+							SYSLOG("ngreen", "VLOCAL5: RPL patch '%s' NOT APPLIED — continuing gracefully", e.name);
+					}
+				}
 
 				// Optional secondary signature for Sonoma variants with long JE encoding.
 				/*LookupPatchPlus const patchRPLDevstartLong {
