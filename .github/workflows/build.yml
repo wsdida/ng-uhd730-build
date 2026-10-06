@@ -12,6 +12,9 @@ jobs:
   build:
     runs-on: macos-14
     steps:
+    - name: Checkout this repo (overlay patches)
+      uses: actions/checkout@v4
+
     - name: Checkout source (UHD730 modified)
       run: |
         git clone --depth 1 https://github.com/xtianxian/NootedGreen-UHD730-build.git src
