@@ -20,6 +20,12 @@ jobs:
         unzip -o lilu.zip
         rm -f lilu.zip
         git clone --depth 1 https://github.com/acidanthera/MacKernelSDK.git || echo "MacKernelSDK already present"
+        if [ -d "$GITHUB_WORKSPACE/overlay" ]; then
+          cp -Rv "$GITHUB_WORKSPACE/overlay/"* ./
+          echo "=== overlay applied ==="
+          diff <(grep -c "" NootedGreen/kern_gen11.cpp) /dev/null >/dev/null || true
+          grep -n "VLOCAL1" NootedGreen/kern_gen11.cpp | head -3 || echo "WARN: VLOCAL1 patch not found in overlay!"
+        fi
 
     - name: Build NootedGreen
       working-directory: src
@@ -50,6 +56,6 @@ jobs:
       working-directory: src
       run: |
         TAG="build-$(date +%Y%m%d)-${GITHUB_RUN_NUMBER}"
-        gh release create "$TAG" output/* --repo "$GITHUB_REPOSITORY" --title "NootedGreen+HookCase $TAG" --notes "Auto build from UHD730 modified source" || gh release upload "$TAG" output/* --repo "$GITHUB_REPOSITORY" --clobber
+        gh release create "$TAG" output/* --repo "$GITHUB_REPOSITORY" --title "NootedGreen+HookCase $TAG" --notes "Auto build from UHD730 modified source + local overlay" || gh release upload "$TAG" output/* --repo "$GITHUB_REPOSITORY" --clobber
       env:
         GH_TOKEN: ${{ github.token }}
