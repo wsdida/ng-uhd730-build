@@ -4013,6 +4013,11 @@ void *Gen11::auxPageTableWithOptsV7(void *that, void *acc, void *task)
 		SYSLOG("ngreen", "VLOCAL9: auxPageTable.withOptions SKIPPED (GT1 crash point #2) — add -ngreenauxtry to attempt");
 		return that;
 	}
+	SYSLOG("ngreen", "VLOCAL9: auxPageTable.withOptions enter (attempting)");
+	void *ret = FunctionCast(auxPageTableWithOptsV7, callback->oauxPageTableWithOptsV7)(that, acc, task);
+	SYSLOG("ngreen", "VLOCAL9: auxPageTable.withOptions exit ret=%p", ret);
+	return ret;
+}
 
 unsigned long Gen11::telemetryCreateManagerV10(void *that, unsigned int flag)
 {
@@ -4020,11 +4025,6 @@ unsigned long Gen11::telemetryCreateManagerV10(void *that, unsigned int flag)
 	// hits the same GT1-broken IOAccelTask::allocate GPU-VA path. Skip entirely.
 	SYSLOG("ngreen", "VLOCAL10: telemetryCreateManager SKIPPED (flag=%u) — GT1 GPU-VA allocation broken", flag);
 	return 0;
-}
-	SYSLOG("ngreen", "VLOCAL9: auxPageTable.withOptions enter (attempting)");
-	void *ret = FunctionCast(auxPageTableWithOptsV7, callback->oauxPageTableWithOptsV7)(that, acc, task);
-	SYSLOG("ngreen", "VLOCAL9: auxPageTable.withOptions exit ret=%p", ret);
-	return ret;
 }
 
 unsigned long Gen11::start(void *that,void  *param_1)
