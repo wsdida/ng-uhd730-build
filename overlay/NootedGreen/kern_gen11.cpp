@@ -1151,6 +1151,9 @@ bool Gen11::processKext(KernelPatcher &patcher, size_t index, mach_vm_address_t 
 			 {"__ZN11IGAccelTask24initManagedPageTableListEv", initManagedPageTableListV7, this->oinitManagedPageTableListV7},
 			 {"__ZN11IGAccelTask24initStampAndScratchPagesEv", initStampAndScratchPagesV7, this->oinitStampAndScratchPagesV7},
 			 {"__ZN14IGAuxPageTable11withOptionsEP16IntelAcceleratorP11IGAccelTask", auxPageTableWithOptsV7, this->oauxPageTableWithOptsV7},
+			 // VLOCAL10: telemetry/OA buffer creation crashes in IOAccelTask::allocate (same
+			 // GT1 GPU-VA null-deref). Telemetry is pure diagnostics — skip entirely.
+			 {"__ZN16IntelAccelerator22telemetryCreateManagerEj", telemetryCreateManagerV10, this->otelemetryCreateManagerV10},
 			 
 		 };
 		SYSLOG("ngreen", "V165: routing %zu HW accelerator symbols", sizeof(requests)/sizeof(requests[0]));
@@ -4010,6 +4013,14 @@ void *Gen11::auxPageTableWithOptsV7(void *that, void *acc, void *task)
 		SYSLOG("ngreen", "VLOCAL9: auxPageTable.withOptions SKIPPED (GT1 crash point #2) — add -ngreenauxtry to attempt");
 		return that;
 	}
+
+unsigned long Gen11::telemetryCreateManagerV10(void *that, unsigned int flag)
+{
+	// VLOCAL10: telemetry is pure diagnostics (OA perf counters) — its OA buffer creation
+	// hits the same GT1-broken IOAccelTask::allocate GPU-VA path. Skip entirely.
+	SYSLOG("ngreen", "VLOCAL10: telemetryCreateManager SKIPPED (flag=%u) — GT1 GPU-VA allocation broken", flag);
+	return 0;
+}
 	SYSLOG("ngreen", "VLOCAL9: auxPageTable.withOptions enter (attempting)");
 	void *ret = FunctionCast(auxPageTableWithOptsV7, callback->oauxPageTableWithOptsV7)(that, acc, task);
 	SYSLOG("ngreen", "VLOCAL9: auxPageTable.withOptions exit ret=%p", ret);
