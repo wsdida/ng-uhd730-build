@@ -3987,9 +3987,17 @@ void Gen11::initManagedPageTableListV7(void *that)
 
 void Gen11::initStampAndScratchPagesV7(void *that)
 {
-	SYSLOG("ngreen", "VLOCAL7: initStampAndScratchPages enter");
+	// VLOCAL8: CONFIRMED GT1 crash point (panic backtrace: initStampAndScratchPages+0x83 →
+	// IGMappedBuffer::withOptions → IOAccelTask::allocate null-deref @ CR2=0). Stamp/scratch
+	// pages are perf-aid structures — skip by default so init continues past this point;
+	// add "-ngreenstamptry" to boot-args to attempt the original call.
+	if (!checkKernelArgument("-ngreenstamptry")) {
+		SYSLOG("ngreen", "VLOCAL8: initStampAndScratchPages SKIPPED (GT1 crash point) — add -ngreenstamptry to attempt");
+		return;
+	}
+	SYSLOG("ngreen", "VLOCAL8: initStampAndScratchPages enter (attempting)");
 	FunctionCast(initStampAndScratchPagesV7, callback->oinitStampAndScratchPagesV7)(that);
-	SYSLOG("ngreen", "VLOCAL7: initStampAndScratchPages exit");
+	SYSLOG("ngreen", "VLOCAL8: initStampAndScratchPages exit");
 }
 
 void *Gen11::auxPageTableWithOptsV7(void *that, void *acc, void *task)
