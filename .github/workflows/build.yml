@@ -24,13 +24,15 @@ jobs:
     - name: Build NootedGreen
       working-directory: src
       run: |
+        set -o pipefail
         xcodebuild -project NootedGreen.xcodeproj -scheme NootedGreen -configuration Release CONFIGURATION_BUILD_DIR=build/Release build 2>&1 | tail -50
         find build -name "*.kext" -type d 2>/dev/null
 
     - name: Build HookCase
       working-directory: src
       run: |
-        xcodebuild -project HookCase-master/HookCase.xcodeproj -scheme HookCase -configuration Release CONFIGURATION_BUILD_DIR=build/Release build 2>&1 | tail -50
+        set -o pipefail
+        xcodebuild -project HookCase-master/HookCase.xcodeproj -scheme HookCase -configuration Release ARCHS=x86_64 ONLY_ACTIVE_ARCH=NO CONFIGURATION_BUILD_DIR=build/Release build 2>&1 | tail -50
         find build HookCase-master/build -name "*.kext" -type d 2>/dev/null
 
     - name: Package
