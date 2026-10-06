@@ -19,7 +19,7 @@ jobs:
         curl -L -o lilu.zip https://github.com/acidanthera/Lilu/releases/download/1.7.2/Lilu-1.7.2-RELEASE.zip
         unzip -o lilu.zip
         rm -f lilu.zip
-        git clone --depth 1 https://github.com/acidanthera/MacKernelSDK.git
+        git clone --depth 1 https://github.com/acidanthera/MacKernelSDK.git || echo "MacKernelSDK already present"
 
     - name: Build NootedGreen
       working-directory: src
