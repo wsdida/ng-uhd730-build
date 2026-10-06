@@ -3673,9 +3673,14 @@ bool Gen11::AppleIntelBaseControllerstart(AppleIntel::AppleIntelBaseController *
 	// VLOCAL1 (wsdida desktop GT1 experiment): force start() success behind a boot-arg toggle.
 	// Rationale: native start() returns false late in init (after hwAUX/DMA/PSR stages);
 	// forcing true lets the controller attach so we can see how far the stack gets.
-	if (!ret && checkKernelArgument("-ngreenforcestart")) {
-		SYSLOG("ngreen", "VLOCAL1: start() returned false — forcing true per -ngreenforcestart");
+	// VLOCAL4: only force-true when the TGL FB kext is loaded (the running controller is
+	// then TGL's, which survives attach — proven at the 11:33 boot). When TGL is absent the
+	// running controller is ICL's; forcing it true creates a zombie that freezes WindowServer.
+	if (!ret && this->tglFBLoaded && checkKernelArgument("-ngreenforcestart")) {
+		SYSLOG("ngreen", "VLOCAL4: start() returned false — forcing true (TGL FB loaded)");
 		ret = true;
+	} else if (!ret && !this->tglFBLoaded) {
+		SYSLOG("ngreen", "VLOCAL4: ICL controller start failed — NOT forcing (TGL FB absent, avoiding zombie)");
 	}
 	
 	if (ret) {
