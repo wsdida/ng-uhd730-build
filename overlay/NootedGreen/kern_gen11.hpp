@@ -1378,6 +1378,18 @@ private:
 	static IOBufferMemoryDescriptor *v116DummyBuf;  // V116: safe dummy page for GGTT[0] remap
 	static uint64_t v116DummyPhys;                  // V116: physical address of dummy page
 	mach_vm_address_t ostart {};
+	// VLOCAL7 (wsdida GT1): Metal init-flow probes — enter/exit loggers around each
+	// IGAccelTask::initWithOptions sub-call to locate the GT1 failure point.
+	static void initAllocatorsV7(AppleIntel::AppleIntelBaseController *that, void *acc);
+	mach_vm_address_t oinitAllocatorsV7 {};
+	static void *newPageTableForTaskV7(void *that, void *task);
+	mach_vm_address_t onewPageTableForTaskV7 {};
+	static void initManagedPageTableListV7(void *that);
+	mach_vm_address_t oinitManagedPageTableListV7 {};
+	static void initStampAndScratchPagesV7(void *that);
+	mach_vm_address_t oinitStampAndScratchPagesV7 {};
+	static void *auxPageTableWithOptsV7(void *that, void *acc, void *task);
+	mach_vm_address_t oauxPageTableWithOptsV7 {};
 
 	static uint8_t deviceStart(void *that);   // V111: force IGAccelDevice::deviceStart true on RPL
 	mach_vm_address_t odeviceStart {};
