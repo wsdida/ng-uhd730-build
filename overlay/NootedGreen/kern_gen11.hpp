@@ -1494,15 +1494,6 @@ private:
 	static void hwConfigureCustomAUX(AppleIntel::AppleIntelBaseController *that, bool param_1);
 	mach_vm_address_t ohwConfigureCustomAUX {};
 
-	// VLOCAL2 (wsdida desktop GT1): read-only init-flow loggers to bisect FBController::start()
-	static void hwInitPMRegistersVLOCAL2(AppleIntel::AppleIntelBaseController *that);
-	mach_vm_address_t ohwInitPMRegistersVLOCAL2 {};
-	static void FBMgrInitVLOCAL2(AppleIntel::AppleIntelBaseController *that);
-	mach_vm_address_t oFBMgrInitVLOCAL2 {};
-	static void probeBootPipeVLOCAL2(AppleIntel::AppleIntelBaseController *that, bool *a1, void *a2);
-	mach_vm_address_t oprobeBootPipeVLOCAL2 {};
-	static void *getFBFromDDIVLOCAL2(AppleIntel::AppleIntelBaseController *that, unsigned int ddi);
-	mach_vm_address_t ogetFBFromDDIVLOCAL2 {};
 	
 	static void FastWriteRegister32(AppleIntel::AppleIntelBaseController *that, unsigned long param_1, uint32_t param_2);
 	mach_vm_address_t oFastWriteRegister32 {};
