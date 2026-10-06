@@ -12,6 +12,9 @@
 #include <kern/thread_call.h>
 
 
+// VLOCAL4: global flag — set true when TGL FB kext loads; gates the forcestart path
+bool gVLOCAL4TGLFBLoaded = false;
+
 // ==== 6 kextInfos: ICL fallback + dual TGL identities (com.xxxxx and com.apple) from /Library/Extensions ====
 //trivial
 // ICL FB — com.apple (fallback path)
@@ -427,6 +430,7 @@ bool Gen11::processKext(KernelPatcher &patcher, size_t index, mach_vm_address_t 
 		
 	}	else if (kextG11FBT.loadIndex == index || kextG11FBTA.loadIndex == index) {
 		this->tglFBLoaded = true;
+		gVLOCAL4TGLFBLoaded = true;
 		auto *activeKext = (kextG11FBTA.loadIndex == index) ? &kextG11FBTA : &kextG11FBT;
 		NGreen::callback->setRMMIOIfNecessary();
 		SYSLOG("ngreen", "init AppleIntelTGLGraphicsFramebuffer");
@@ -3676,10 +3680,10 @@ bool Gen11::AppleIntelBaseControllerstart(AppleIntel::AppleIntelBaseController *
 	// VLOCAL4: only force-true when the TGL FB kext is loaded (the running controller is
 	// then TGL's, which survives attach — proven at the 11:33 boot). When TGL is absent the
 	// running controller is ICL's; forcing it true creates a zombie that freezes WindowServer.
-	if (!ret && this->tglFBLoaded && checkKernelArgument("-ngreenforcestart")) {
+	if (!ret && gVLOCAL4TGLFBLoaded && checkKernelArgument("-ngreenforcestart")) {
 		SYSLOG("ngreen", "VLOCAL4: start() returned false — forcing true (TGL FB loaded)");
 		ret = true;
-	} else if (!ret && !this->tglFBLoaded) {
+	} else if (!ret && !gVLOCAL4TGLFBLoaded) {
 		SYSLOG("ngreen", "VLOCAL4: ICL controller start failed — NOT forcing (TGL FB absent, avoiding zombie)");
 	}
 	
