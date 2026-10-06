@@ -50,6 +50,6 @@ jobs:
       working-directory: src
       run: |
         TAG="build-$(date +%Y%m%d)-${GITHUB_RUN_NUMBER}"
-        gh release create "$TAG" output/* --title "NootedGreen+HookCase $TAG" --notes "Auto build from UHD730 modified source" || gh release upload "$TAG" output/* --clobber
+        gh release create "$TAG" output/* --repo "$GITHUB_REPOSITORY" --title "NootedGreen+HookCase $TAG" --notes "Auto build from UHD730 modified source" || gh release upload "$TAG" output/* --repo "$GITHUB_REPOSITORY" --clobber
       env:
         GH_TOKEN: ${{ github.token }}
