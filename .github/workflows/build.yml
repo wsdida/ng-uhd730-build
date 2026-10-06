@@ -1,0 +1,53 @@
+name: Build NootedGreen + HookCase
+
+on:
+  push:
+    branches: [ "*" ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+    - name: Checkout source (UHD730 modified)
+      run: |
+        git clone --depth 1 https://github.com/xtianxian/NootedGreen-UHD730-build.git src
+        cd src
+        curl -L -o lilu.zip https://github.com/acidanthera/Lilu/releases/download/1.7.2/Lilu-1.7.2-RELEASE.zip
+        unzip -o lilu.zip
+        rm -f lilu.zip
+        git clone --depth 1 https://github.com/acidanthera/MacKernelSDK.git
+
+    - name: Build NootedGreen
+      working-directory: src
+      run: |
+        xcodebuild -project NootedGreen.xcodeproj -scheme NootedGreen -configuration Release CONFIGURATION_BUILD_DIR=build/Release build 2>&1 | tail -50
+        find build -name "*.kext" -type d 2>/dev/null
+
+    - name: Build HookCase
+      working-directory: src
+      run: |
+        xcodebuild -project HookCase-master/HookCase.xcodeproj -scheme HookCase -configuration Release CONFIGURATION_BUILD_DIR=build/Release build 2>&1 | tail -50
+        find build HookCase-master/build -name "*.kext" -type d 2>/dev/null
+
+    - name: Package
+      working-directory: src
+      run: |
+        mkdir -p output
+        NG=$(find build -name "NootedGreen.kext" -type d 2>/dev/null | head -1)
+        HC=$(find build HookCase-master/build -name "HookCase.kext" -type d 2>/dev/null | head -1)
+        if [ -n "$NG" ]; then zip -rqy output/NootedGreen.kext.zip "$NG"; else echo "WARN: NootedGreen.kext not found"; fi
+        if [ -n "$HC" ]; then zip -rqy output/HookCase.kext.zip "$HC"; else echo "WARN: HookCase.kext not found"; fi
+        { echo "NootedGreen: $NG"; echo "HookCase: $HC"; echo "built: $(date -u)"; } > output/build-info.txt
+        ls -la output
+
+    - name: Release
+      working-directory: src
+      run: |
+        TAG="build-$(date +%Y%m%d)-${GITHUB_RUN_NUMBER}"
+        gh release create "$TAG" output/* --title "NootedGreen+HookCase $TAG" --notes "Auto build from UHD730 modified source" || gh release upload "$TAG" output/* --clobber
+      env:
+        GH_TOKEN: ${{ github.token }}
