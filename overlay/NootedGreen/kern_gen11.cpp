@@ -3957,6 +3957,16 @@ static void v45ScheduleDelayedCheck(void *accelInstance, unsigned delayMs);
 
 unsigned long Gen11::start(void *that,void  *param_1)
 {
+	// VLOCAL6: Metal experiment gate — IntelAccelerator::start on desktop RPL GT1 crashes
+	// inside IGAccelTask::withOptions (IOAccelTask::release page fault @ +0xc78, the GT1
+	// task-init failure path upstream is still debugging). Default OFF for stability;
+	// add "-ngreenmetaltry" to boot-args to attempt the start (captures panic diagnostics).
+	if (!checkKernelArgument("-ngreenmetaltry")) {
+		SYSLOG("ngreen", "VLOCAL6: IntelAccelerator::start blocked — add -ngreenmetaltry to attempt Metal");
+		return 0;
+	}
+	SYSLOG("ngreen", "VLOCAL6: -ngreenmetaltry present — attempting IntelAccelerator::start");
+
 	// V44: Configurable scheduler type.
 	// populateAccelConfig reads "GraphicsSchedulerSelect" from the IORegistry.
 	// Types: 3=IGGuC (firmware), 4=IGScheduler4, 5=IGScheduler5 (host preemptive).
