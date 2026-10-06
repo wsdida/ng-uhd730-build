@@ -1144,6 +1144,13 @@ bool Gen11::processKext(KernelPatcher &patcher, size_t index, mach_vm_address_t 
 			 // Resolve-context getters are used by barrierSubmission and are generally safe.
 			 {"__ZN11IGAccelTask22getDepthResolveContextEb", getDepthResolveContext, this->ogetDepthResolveContext},
 			 {"__ZN11IGAccelTask22getColorResolveContextEb", getColorResolveContext, this->ogetColorResolveContext},
+
+			 // VLOCAL7 (wsdida GT1): Metal init-flow probes — locate the initWithOptions failure
+			 {"__ZN11IGAccelTask14initAllocatorsEP16IntelAccelerator", initAllocatorsV7, this->oinitAllocatorsV7},
+			 {"__ZN15IGMemoryManager19newPageTableForTaskEP11IGAccelTask", newPageTableForTaskV7, this->onewPageTableForTaskV7},
+			 {"__ZN11IGAccelTask24initManagedPageTableListEv", initManagedPageTableListV7, this->oinitManagedPageTableListV7},
+			 {"__ZN11IGAccelTask24initStampAndScratchPagesEv", initStampAndScratchPagesV7, this->oinitStampAndScratchPagesV7},
+			 {"__ZN14IGAuxPageTable11withOptionsEP16IntelAcceleratorP11IGAccelTask", auxPageTableWithOptsV7, this->oauxPageTableWithOptsV7},
 			 
 		 };
 		SYSLOG("ngreen", "V165: routing %zu HW accelerator symbols", sizeof(requests)/sizeof(requests[0]));
@@ -3954,6 +3961,44 @@ int Gen11::wrapHwSetupMemory(AppleIntel::AppleIntelBaseController *that, AppleIn
 
 static void v44ScheduleBundleLog(void *accelInstance, unsigned delayMs);
 static void v45ScheduleDelayedCheck(void *accelInstance, unsigned delayMs);
+
+// VLOCAL7 (wsdida GT1): enter/exit loggers around each IGAccelTask::initWithOptions sub-call.
+void Gen11::initAllocatorsV7(AppleIntel::AppleIntelBaseController *that, void *acc)
+{
+	SYSLOG("ngreen", "VLOCAL7: initAllocators enter");
+	FunctionCast(initAllocatorsV7, callback->oinitAllocatorsV7)(that, acc);
+	SYSLOG("ngreen", "VLOCAL7: initAllocators exit");
+}
+
+void *Gen11::newPageTableForTaskV7(void *that, void *task)
+{
+	SYSLOG("ngreen", "VLOCAL7: newPageTableForTask enter");
+	void *ret = FunctionCast(newPageTableForTaskV7, callback->onewPageTableForTaskV7)(that, task);
+	SYSLOG("ngreen", "VLOCAL7: newPageTableForTask exit ret=%p", ret);
+	return ret;
+}
+
+void Gen11::initManagedPageTableListV7(void *that)
+{
+	SYSLOG("ngreen", "VLOCAL7: initManagedPageTableList enter");
+	FunctionCast(initManagedPageTableListV7, callback->oinitManagedPageTableListV7)(that);
+	SYSLOG("ngreen", "VLOCAL7: initManagedPageTableList exit");
+}
+
+void Gen11::initStampAndScratchPagesV7(void *that)
+{
+	SYSLOG("ngreen", "VLOCAL7: initStampAndScratchPages enter");
+	FunctionCast(initStampAndScratchPagesV7, callback->oinitStampAndScratchPagesV7)(that);
+	SYSLOG("ngreen", "VLOCAL7: initStampAndScratchPages exit");
+}
+
+void *Gen11::auxPageTableWithOptsV7(void *that, void *acc, void *task)
+{
+	SYSLOG("ngreen", "VLOCAL7: auxPageTable.withOptions enter");
+	void *ret = FunctionCast(auxPageTableWithOptsV7, callback->oauxPageTableWithOptsV7)(that, acc, task);
+	SYSLOG("ngreen", "VLOCAL7: auxPageTable.withOptions exit ret=%p", ret);
+	return ret;
+}
 
 unsigned long Gen11::start(void *that,void  *param_1)
 {
