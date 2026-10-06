@@ -11,8 +11,6 @@
 #include <IOKit/IOLib.h>
 #include <kern/thread_call.h>
 
-// VLOCAL2: forward declaration for probeBootPipe signature
-namespace AppleIntelPortHAL { class DDI; }
 
 // ==== 6 kextInfos: ICL fallback + dual TGL identities (com.xxxxx and com.apple) from /Library/Extensions ====
 //trivial
@@ -544,11 +542,6 @@ bool Gen11::processKext(KernelPatcher &patcher, size_t index, mach_vm_address_t 
 			{"__ZN19AppleIntelPowerWell22hwSetPowerWellStateAuxEbj",hwSetPowerWellStateAux, this->ohwSetPowerWellStateAux},
 			{"__ZN19AppleIntelPowerWell22hwSetPowerWellStateDDIEbj",hwSetPowerWellStateDDI, this->ohwSetPowerWellStateDDI},
 			{"__ZN31AppleIntelRegisterAccessManager19FastWriteRegister32Emj",FastWriteRegister32, this->oFastWriteRegister32},
-			// VLOCAL2 (wsdida GT1): init-flow bisect loggers (read-only)
-			{"__ZN24AppleIntelBaseController15initPMRegistersEv", hwInitPMRegistersVLOCAL2, this->ohwInitPMRegistersVLOCAL2},
-			{"__ZN24AppleIntelBaseController13FBMemMgr_InitEv", FBMgrInitVLOCAL2, this->oFBMgrInitVLOCAL2},
-			{"__ZN24AppleIntelBaseController13probeBootPipeEPbPN17AppleIntelPortHAL3DDIE", probeBootPipeVLOCAL2, this->oprobeBootPipeVLOCAL2},
-			{"__ZN24AppleIntelBaseController12getFBFromDDIEj", getFBFromDDIVLOCAL2, this->ogetFBFromDDIVLOCAL2},
 			// V60: ReadRegister32 hooks DISABLED — V59 proved they cause 0-children regression
 			// (display driver loops in forceWake power-well cycling, never completes init)
 			/*{"__ZN31AppleIntelRegisterAccessManager14ReadRegister32Em",raReadRegister32, this->oraReadRegister32},
@@ -9490,35 +9483,7 @@ void Gen11::hwConfigureCustomAUX(AppleIntel::AppleIntelBaseController *that, boo
 		FunctionCast(hwConfigureCustomAUX, callback->ohwConfigureCustomAUX)(that, param_1);
 }
 
-// VLOCAL2 (wsdida desktop GT1): read-only loggers — call through to Apple and log flow.
-void Gen11::hwInitPMRegistersVLOCAL2(AppleIntel::AppleIntelBaseController *that)
-{
-	SYSLOG("ngreen", "VLOCAL2: initPMRegisters enter");
-	FunctionCast(hwInitPMRegistersVLOCAL2, callback->ohwInitPMRegistersVLOCAL2)(that);
-	SYSLOG("ngreen", "VLOCAL2: initPMRegisters exit");
-}
 
-void Gen11::FBMgrInitVLOCAL2(AppleIntel::AppleIntelBaseController *that)
-{
-	SYSLOG("ngreen", "VLOCAL2: FBMemMgr_Init enter");
-	FunctionCast(FBMgrInitVLOCAL2, callback->oFBMgrInitVLOCAL2)(that);
-	SYSLOG("ngreen", "VLOCAL2: FBMemMgr_Init exit");
-}
-
-void Gen11::probeBootPipeVLOCAL2(AppleIntel::AppleIntelBaseController *that, bool *a1, void *a2)
-{
-	SYSLOG("ngreen", "VLOCAL2: probeBootPipe enter");
-	FunctionCast(probeBootPipeVLOCAL2, callback->oprobeBootPipeVLOCAL2)(that, a1, a2);
-	SYSLOG("ngreen", "VLOCAL2: probeBootPipe exit");
-}
-
-void *Gen11::getFBFromDDIVLOCAL2(AppleIntel::AppleIntelBaseController *that, unsigned int ddi)
-{
-	SYSLOG("ngreen", "VLOCAL2: getFBFromDDI enter ddi=%u", ddi);
-	void *ret = FunctionCast(getFBFromDDIVLOCAL2, callback->ogetFBFromDDIVLOCAL2)(that, ddi);
-	SYSLOG("ngreen", "VLOCAL2: getFBFromDDI exit ddi=%u ret=%p", ddi, ret);
-	return ret;
-}
 
 int Gen11::hasExternalDispla()
 {
