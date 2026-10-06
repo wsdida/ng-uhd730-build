@@ -1390,6 +1390,8 @@ private:
 	mach_vm_address_t oinitStampAndScratchPagesV7 {};
 	static void *auxPageTableWithOptsV7(void *that, void *acc, void *task);
 	mach_vm_address_t oauxPageTableWithOptsV7 {};
+	static unsigned long telemetryCreateManagerV10(void *that, unsigned int flag);
+	mach_vm_address_t otelemetryCreateManagerV10 {};
 
 	static uint8_t deviceStart(void *that);   // V111: force IGAccelDevice::deviceStart true on RPL
 	mach_vm_address_t odeviceStart {};
