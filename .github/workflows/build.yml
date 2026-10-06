@@ -26,15 +26,14 @@ jobs:
         if [ -d "$GITHUB_WORKSPACE/overlay" ]; then
           cp -Rv "$GITHUB_WORKSPACE/overlay/"* ./
           echo "=== overlay applied ==="
-          diff <(grep -c "" NootedGreen/kern_gen11.cpp) /dev/null >/dev/null || true
-          grep -n "VLOCAL1" NootedGreen/kern_gen11.cpp | head -3 || echo "WARN: VLOCAL1 patch not found in overlay!"
+          grep -n "VLOCAL1\|VLOCAL2" NootedGreen/kern_gen11.cpp | head -5 || echo "WARN: overlay patch not found!"
         fi
 
     - name: Build NootedGreen
       working-directory: src
       run: |
         set -o pipefail
-        xcodebuild -project NootedGreen.xcodeproj -scheme NootedGreen -configuration Release CONFIGURATION_BUILD_DIR=build/Release build 2>&1 | tail -50
+        xcodebuild -project NootedGreen.xcodeproj -scheme NootedGreen -configuration Release CONFIGURATION_BUILD_DIR=build/Release build 2>&1 | tail -400
         find build -name "*.kext" -type d 2>/dev/null
 
     - name: Build HookCase
