@@ -4002,9 +4002,17 @@ void Gen11::initStampAndScratchPagesV7(void *that)
 
 void *Gen11::auxPageTableWithOptsV7(void *that, void *acc, void *task)
 {
-	SYSLOG("ngreen", "VLOCAL7: auxPageTable.withOptions enter");
+	// VLOCAL9: CONFIRMED crash point #2 (panic: IGAuxPageTable::initWithOptions+0x45 →
+	// IGMappedBuffer::getGPUVirtualAddress null-deref @ CR2=0x30 — the IGMappedBuffer
+	// creation fails via the same broken IOAccelTask::allocate GPU-VA path). Skip by
+	// default; add "-ngreenauxtry" to attempt the original call.
+	if (!checkKernelArgument("-ngreenauxtry")) {
+		SYSLOG("ngreen", "VLOCAL9: auxPageTable.withOptions SKIPPED (GT1 crash point #2) — add -ngreenauxtry to attempt");
+		return that;
+	}
+	SYSLOG("ngreen", "VLOCAL9: auxPageTable.withOptions enter (attempting)");
 	void *ret = FunctionCast(auxPageTableWithOptsV7, callback->oauxPageTableWithOptsV7)(that, acc, task);
-	SYSLOG("ngreen", "VLOCAL7: auxPageTable.withOptions exit ret=%p", ret);
+	SYSLOG("ngreen", "VLOCAL9: auxPageTable.withOptions exit ret=%p", ret);
 	return ret;
 }
 
