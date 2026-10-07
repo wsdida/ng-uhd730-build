@@ -45,6 +45,23 @@ static volatile uint64_t gV20ArmNs   = 0;
 static volatile int      gV20Armed   = 0;
 static volatile int      gV20Dumped  = 0;
 
+// ============================================================================
+// VLOCAL21 (wsdida GT1): auto-escape — never require a manual power cut.
+//
+// The user's machine cannot be hard power-cycled to recover from a frozen
+// display-init attempt. So once the V20 watchdog has dumped the MMIO trace we
+// start a countdown; when it expires we panic(). XNU reboots by itself after a
+// panic, so the box comes back on its own, and the panic report — which carries
+// the register trace embedded in the panic string — is written to
+// /Library/Logs/DiagnosticReports on the next clean boot.
+//
+// Gate: -ngreenautoreboot          → default 90 s countdown
+//       -ngreenautoreboot=<sec>    → custom countdown (10..900)
+// Absent → no auto reboot (V20 behaviour: dump once and stay frozen).
+// ============================================================================
+static volatile uint64_t gV21StallNs  = 0;
+static volatile int      gV21LastTick = -1;
+
 static inline uint64_t v20NowNs() {
     uint64_t t = 0;
     clock_get_uptime(&t);
@@ -145,6 +162,21 @@ static bool isWEGCoexistMode() {
 	}
 
 	return checkKernelArgument("-ngwegcoex");
+}
+
+// VLOCAL21: auto-reboot delay in seconds (0 = disabled). Mirrors the
+// isWEGCoexistMode() parsing pattern: "<key>=<n>" first, bare flag second.
+static int v21AutoRebootDelay() {
+	int v = 0;
+	if (PE_parse_boot_argn("ngreenautoreboot", &v, sizeof(v)) && v >= 10 && v <= 900) {
+		return v;
+	}
+
+	if (checkKernelArgument("-ngreenautoreboot")) {
+		return 90;
+	}
+
+	return 0;
 }
 
 static bool isExperimentalMonitorEnabled() {
@@ -8655,6 +8687,50 @@ void Gen11::v20StallWatch(thread_call_param_t param0, thread_call_param_t param1
 			IOLog("ngreen: V20STALL: trace end (idx=%d)\n", n);
 		}
 	}
+	// ---- VLOCAL21: auto-escape countdown ------------------------------------
+	// Fires only after the V20 detector actually tripped (gV20Dumped) on a real
+	// iGPU boot pipe (gV20Armed). The dGPU fallback boot never arms any of this,
+	// so a normal boot is completely unaffected.
+	if (gV20Armed && gV20Dumped) {
+		int delay = v21AutoRebootDelay();
+		if (delay > 0) {
+			if (gV21StallNs == 0)
+				gV21StallNs = now;
+			uint64_t sec = (now > gV21StallNs) ? (now - gV21StallNs) / 1000000000ULL : 0;
+
+			if (sec >= (uint64_t)delay) {
+				int n = gTr20Idx;
+				int cnt = (n < 6) ? n : 6;
+				NGTr20Entry *e0 = &gTr20[(n - cnt) & 63];
+				SYSLOG("ngreen", "V21: AUTO REBOOT now — display init stalled %llu s, mmio idx=%d",
+					   (unsigned long long)sec, n);
+				IOLog("ngreen: V21: AUTO REBOOT NOW (display init stalled %us)\n",
+					  (unsigned)(sec > 9999 ? 9999 : sec));
+				// panic() -> XNU reboots by itself. The panic string carries the
+				// last four display-range accesses so the hang point survives.
+				if (cnt >= 4) {
+					panic("NGRN V21 auto-reboot: display-init stalled. last MMIO:"
+						  " %s 0x%05x=0x%08x | %s 0x%05x=0x%08x | %s 0x%05x=0x%08x | %s 0x%05x=0x%08x",
+						  e0[0].wr ? "WR" : "RD", e0[0].addr, e0[0].val,
+						  e0[1].wr ? "WR" : "RD", e0[1].addr, e0[1].val,
+						  e0[2].wr ? "WR" : "RD", e0[2].addr, e0[2].val,
+						  e0[3].wr ? "WR" : "RD", e0[3].addr, e0[3].val);
+				} else {
+					panic("NGRN V21 auto-reboot: display-init stalled (mmio idx=%d, too few entries)", n);
+				}
+			}
+
+			// Countdown banner every 10 s (keeps the verbose console readable).
+			int tick = (int)(sec / 10);
+			if (tick != gV21LastTick) {
+				gV21LastTick = tick;
+				IOLog("ngreen: V21: display init stalled — AUTO REBOOT in %us (move the display cable to the dGPU now)\n",
+					  (unsigned)(delay - (int)sec));
+				SYSLOG("ngreen", "V21: stall — auto reboot in %llu s", (unsigned long long)(delay - (int)sec));
+			}
+		}
+	}
+
 	// Re-arm every 1000 ms; retain travels with the timer (same pattern as V74).
 	auto *svc = static_cast<IOService *>(param0);
 	if (!NGreen::callback->mmioValid()) {
