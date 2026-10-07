@@ -4044,6 +4044,14 @@ unsigned int Gen11::probeBootPipeV12(AppleIntel::AppleIntelBaseController *that,
 	SYSLOG("ngreen", "VLOCAL13: probeBootPipe enter");
 	unsigned int ret = FunctionCast(probeBootPipeV12, callback->oprobeBootPipeV12)(that, a1, a2);
 	SYSLOG("ngreen", "VLOCAL13: probeBootPipe exit ret=0x%x", ret);
+	// VLOCAL14 (wsdida GT1): return value semantics discovered via disassembly —
+	// 0/1/2 = boot pipe index, 0xffff = no boot pipe (UEFI never touched the iGPU
+	// because the dGPU is the primary display). Fake pipe 0 behind a gate so the
+	// FB driver proceeds into display-pipe creation instead of failing start().
+	if (ret == 0xffff && checkKernelArgument("-ngreenfakebootpipe")) {
+		SYSLOG("ngreen", "VLOCAL14: no boot pipe (0xffff) — faking pipe 0 per -ngreenfakebootpipe");
+		ret = 0;
+	}
 	return ret;
 }
 
