@@ -557,6 +557,8 @@ bool Gen11::processKext(KernelPatcher &patcher, size_t index, mach_vm_address_t 
 			{"__ZN24AppleIntelBaseController15initPMRegistersEv", initPMRegistersV12, this->oinitPMRegistersV12},
 			// VLOCAL15: fuse-read sanitizer (BIOS IGFX + PowerWell::init DDI-loop crash)
 			{"__ZN31AppleIntelRegisterAccessManager14ReadRegister32Em", ReadRegister32V15, this->oReadRegister32V15},
+			// VLOCAL17: skip setupBootDisplay (ports absent without VBT)
+			{"__ZN24AppleIntelBaseController16setupBootDisplayEv", setupBootDisplayV17, this->osetupBootDisplayV17},
 			// V60: ReadRegister32 hooks DISABLED — V59 proved they cause 0-children regression
 			// (display driver loops in forceWake power-well cycling, never completes init)
 			/*{"__ZN31AppleIntelRegisterAccessManager14ReadRegister32Em",raReadRegister32, this->oraReadRegister32},
@@ -4088,6 +4090,20 @@ uint32_t Gen11::ReadRegister32V15(void *that, unsigned long addr)
 		return 0;
 	}
 	return ret;
+}
+
+// VLOCAL17 (wsdida GT1): setupBootDisplay crashes at AppleIntelPort::getPortByDDI
+// returning NULL (no ports exist — no VBT/OpRegion on this desktop). Caller does
+// testl eax; je continue — returning 0 lets start() proceed past boot-display
+// adoption. Gate: -ngreenskipbootdisp.
+unsigned int Gen11::setupBootDisplayV17(AppleIntel::AppleIntelBaseController *that)
+{
+	if (checkKernelArgument("-ngreenskipbootdisp")) {
+		SYSLOG("ngreen", "VLOCAL17: setupBootDisplay SKIPPED per -ngreenskipbootdisp (ports absent, VBT missing)");
+		return 0;
+	}
+	SYSLOG("ngreen", "VLOCAL17: setupBootDisplay enter (native)");
+	return FunctionCast(setupBootDisplayV17, callback->osetupBootDisplayV17)(that);
 }
 
 void *Gen11::getFBFromDDIV12(AppleIntel::AppleIntelBaseController *that, unsigned int ddi)
