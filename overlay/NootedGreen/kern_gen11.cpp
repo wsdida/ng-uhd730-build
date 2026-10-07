@@ -805,6 +805,20 @@ bool Gen11::processKext(KernelPatcher &patcher, size_t index, mach_vm_address_t 
 			else
 				SYSLOG("ngreen", "V25: SafeForceWake caller-trace route OK");
 		}
+
+		// VLOCAL27 (wsdida GT1): the two start() bail-out points — TCON SW init and
+		// cursor-memory (VRAM) allocation. Pure passthroughs that only read the
+		// object's own fields after the original returns. Non-fatal.
+		{
+			RouteRequestPlus v27Requests[] = {
+				{"__ZN12CamelliaBase16InitTconSWCommonEP24AppleIntelBaseController", initTconSWCommonV27, this->oinitTconSWCommonV27},
+				{"__ZN24AppleIntelBaseController19hwSetupCursorMemoryEv", hwSetupCursorMemoryV27, this->ohwSetupCursorMemoryV27},
+			};
+			if (!RouteRequestPlus::routeAll(patcher, index, v27Requests, address, size))
+				SYSLOG("ngreen", "V27: some start() bail-out routes missing (non-fatal)");
+			else
+				SYSLOG("ngreen", "V27: start() bail-out routes OK (InitTconSWCommon / hwSetupCursorMemory)");
+		}
 		
 		if (isprod) {
 			RouteRequestPlus requests[] = {
@@ -3009,6 +3023,71 @@ void Gen11::safeForceWakeV25(bool render, unsigned int domains)
 			  render ? 1u : 0u, domains, ra, gV25FwLogs);
 	}
 	FunctionCast(safeForceWakeV25, callback->osafeForceWakeV25)(render, domains);
+}
+
+// ============================================================================
+// VLOCAL27: probe the two places where AppleIntelBaseController::start() bails
+// out. Reverse engineering the TGL FB kext (GPUDriversIntel-16.0.32) shows the
+// whole boot-display path is abandoned at the first non-zero return:
+//
+//   0x5be3a callq setupBootDisplay ; je 0x5c0c0            (this one passes)
+//   0x5c364 callq CamelliaTcon2::operator new
+//   0x5c398 callq *0x120(%rax)   -> InitTconSWE -> InitTconSWCommon
+//          on failure: "TCON: Built-in port not found" / "fcfb" / "fmclk",
+//          TCON pointer is zeroed and the whole TCON bring-up is skipped
+//   0x5c67d callq hwSetupCursorMemory ; je 0x5c6cc
+//          on failure: "Can't allocate cursor memory" -> start() returns false
+//          (preceded by "vramptr is NULL" at 0x5c5f5)
+//
+// Because start() aborts there, hwSetMode / enableController / setupDefaultDBUF
+// (breadcrumb steps 20/21/22) never run and the display is never programmed —
+// which is exactly the black screen. Log the return value plus every field the
+// two functions branch on, so the next boot yields the exact numbers a fix
+// needs instead of another round of guessing.
+// ============================================================================
+static inline int v27RdInt(void *o, long off) {
+	return *(volatile int *)((char *)o + off);
+}
+
+static inline void *v27RdPtr(void *o, long off) {
+	return *(void *volatile *)((char *)o + off);
+}
+
+// CamelliaBase::InitTconSWCommon(AppleIntelBaseController*) -> int
+static int gV27TconLogs = 0;
+int Gen11::initTconSWCommonV27(void *that, void *controller)
+{
+	int ret = FunctionCast(initTconSWCommonV27, callback->oinitTconSWCommonV27)(that, controller);
+	if (gV27TconLogs < 8) {
+		gV27TconLogs++;
+		SYSLOG("ngreen", "V27 InitTconSWCommon ret=0x%x | fcfb(0x50)=%p bip(0x60)=%p "
+			   "mclk(0x74)=%d vclk(0x78)=%d beacon(0x7c)=%d minT(0x80)=%d maxT(0x84)=%d",
+			   ret, v27RdPtr(that, 0x50), v27RdPtr(that, 0x60),
+			   v27RdInt(that, 0x74), v27RdInt(that, 0x78), v27RdInt(that, 0x7c),
+			   v27RdInt(that, 0x80), v27RdInt(that, 0x84));
+		IOLog("ngreen: V27 InitTconSWCommon ret=0x%x bip=%p mclk=%d vclk=%d\n",
+			  ret, v27RdPtr(that, 0x60), v27RdInt(that, 0x74), v27RdInt(that, 0x78));
+	}
+	return ret;
+}
+
+// AppleIntelBaseController::hwSetupCursorMemory() -> int
+static int gV27CurLogs = 0;
+int Gen11::hwSetupCursorMemoryV27(void *that)
+{
+	int ret = FunctionCast(hwSetupCursorMemoryV27, callback->ohwSetupCursorMemoryV27)(that);
+	if (gV27CurLogs < 8) {
+		gV27CurLogs++;
+		void *tcon = v27RdPtr(that, 0xd0);
+		SYSLOG("ngreen", "V27 hwSetupCursorMemory ret=0x%x | de4=%d dc8=%d d0(tcon)=%p "
+			   "vramalloc(0xc0)=%p vramptr(0xc8)=%p",
+			   ret, v27RdInt(that, 0xde4), v27RdInt(that, 0xdc8), tcon,
+			   tcon ? v27RdPtr(tcon, 0xc0) : (void *)0,
+			   tcon ? v27RdPtr(tcon, 0xc8) : (void *)0);
+		IOLog("ngreen: V27 hwSetupCursorMemory ret=0x%x de4=%d tcon=%p vramptr=%p\n",
+			  ret, v27RdInt(that, 0xde4), tcon, tcon ? v27RdPtr(tcon, 0xc8) : (void *)0);
+	}
+	return ret;
 }
 
 // Breadcrumb for the display-clock-domain window itself: the driver reads
