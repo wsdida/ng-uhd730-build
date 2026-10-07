@@ -84,9 +84,11 @@ static volatile int       gV22RefShown = 0;
 // the register trace embedded in the panic string — is written to
 // /Library/Logs/DiagnosticReports on the next clean boot.
 //
-// Gate: -ngreenautoreboot          → default 90 s countdown
-//       -ngreenautoreboot=<sec>    → custom countdown (10..900)
-// Absent → no auto reboot (V20 behaviour: dump once and stay frozen).
+// Gate (V25): -ngreenpanicstall          → default 90 s countdown
+//              -ngreenpanicstall=<sec>   → custom countdown (10..900)
+// Absent → log-only, NEVER panics. The V23 gate (-ngreenautoreboot) fired on
+// every boot because the step=4 stall is persistent while the rest of the
+// system boots fine — the escape hatch had become the crash itself.
 // ============================================================================
 static volatile uint64_t gV21StallNs  = 0;
 static volatile int      gV21LastTick = -1;
@@ -232,13 +234,15 @@ static bool isWEGCoexistMode() {
 
 // VLOCAL21: auto-reboot delay in seconds (0 = disabled). Mirrors the
 // isWEGCoexistMode() parsing pattern: "<key>=<n>" first, bare flag second.
+//
+// V25: panic is OPT-IN. Default = log the stall verdict and keep running.
 static int v21AutoRebootDelay() {
 	int v = 0;
-	if (PE_parse_boot_argn("ngreenautoreboot", &v, sizeof(v)) && v >= 10 && v <= 900) {
+	if (PE_parse_boot_argn("ngreenpanicstall", &v, sizeof(v)) && v >= 10 && v <= 900) {
 		return v;
 	}
 
-	if (checkKernelArgument("-ngreenautoreboot")) {
+	if (checkKernelArgument("-ngreenpanicstall")) {
 		return 90;
 	}
 
@@ -787,6 +791,19 @@ bool Gen11::processKext(KernelPatcher &patcher, size_t index, mach_vm_address_t 
 				SYSLOG("ngreen", "V24: some TCON routes missing (non-fatal)");
 			else
 				SYSLOG("ngreen", "V24: TCON routes OK (CamelliaTcon2 new/ctor, BanksiaTcon ctor)");
+		}
+
+		// VLOCAL25 (wsdida GT1): pin the SafeForceWake call site — see the hook
+		// definition. Non-fatal: the symbol is local (static) and may not be
+		// resolvable through the kernel's symbol resolver at runtime.
+		{
+			RouteRequestPlus v25Requests[] = {
+				{"__ZL13SafeForceWakebj", safeForceWakeV25, this->osafeForceWakeV25},
+			};
+			if (!RouteRequestPlus::routeAll(patcher, index, v25Requests, address, size))
+				SYSLOG("ngreen", "V25: SafeForceWake route missing (non-fatal, local symbol)");
+			else
+				SYSLOG("ngreen", "V25: SafeForceWake caller-trace route OK");
 		}
 		
 		if (isprod) {
@@ -2915,6 +2932,9 @@ void Gen11::setupDefaultDBUFV22(void *that)
 
 static inline void v24TconMark(const char *what)
 {
+	// V25: mirror to SYSLOG — IOLog alone never reaches the archived Lilu log,
+	// which is why the V24 TCON markers were invisible in every dump so far.
+	SYSLOG("ngreen", "V24 TCON %s ra=0x%lx", what, (unsigned long)__builtin_return_address(0));
 	IOLog("ngreen: V24 TCON %s ra=0x%lx\n", what,
 		  (unsigned long)__builtin_return_address(0));
 }
@@ -2928,6 +2948,7 @@ static inline void v24TconMark(const char *what)
 // and the callers ignore it — 0x5c374 stores the new pointer from operator new).
 void *Gen11::CamelliaTcon2_new(unsigned long size)
 {
+	ngStep(30, "TCON Camellia alloc");
 	v24TconMark("CamelliaTcon2::operator new enter");
 	void *ret = FunctionCast(CamelliaTcon2_new, callback->oCamelliaTcon2_new)(size);
 	v24TconMark("CamelliaTcon2::operator new exit");
@@ -2936,6 +2957,7 @@ void *Gen11::CamelliaTcon2_new(unsigned long size)
 
 void *Gen11::CamelliaTcon2_ctor(void *that)
 {
+	ngStep(31, "TCON Camellia ctor");
 	v24TconMark("CamelliaTcon2::ctor enter");
 	void *ret = FunctionCast(CamelliaTcon2_ctor, callback->oCamelliaTcon2_ctor)(that);
 	v24TconMark("CamelliaTcon2::ctor exit");
@@ -2944,10 +2966,29 @@ void *Gen11::CamelliaTcon2_ctor(void *that)
 
 void *Gen11::BanksiaTcon_ctor(void *that)
 {
+	ngStep(32, "TCON Banksia ctor");
 	v24TconMark("BanksiaTcon::ctor enter");
 	void *ret = FunctionCast(BanksiaTcon_ctor, callback->oBanksiaTcon_ctor)(that);
 	v24TconMark("BanksiaTcon::ctor exit");
 	return ret;
+}
+
+// VLOCAL25: SafeForceWake passthrough. The V23 trace always ends INSIDE this
+// helper and the handshake itself completes (ack 0->1 on get, back to 0 on
+// put), so the real hang is in whoever called it. Log the caller's return
+// address (bounded) to pin the exact call site on the next boot.
+static int gV25FwLogs = 0;
+void Gen11::safeForceWakeV25(bool render, unsigned int domains)
+{
+	if (gV20Armed && gV25FwLogs < 24) {
+		gV25FwLogs++;
+		void *ra = __builtin_return_address(0);
+		SYSLOG("ngreen", "V25 SafeForceWake(render=%u mask=0x%x) caller ra=%p #%d",
+			   render ? 1u : 0u, domains, ra, gV25FwLogs);
+		IOLog("ngreen: V25 SafeForceWake(render=%u mask=0x%x) caller ra=%p #%d\n",
+			  render ? 1u : 0u, domains, ra, gV25FwLogs);
+	}
+	FunctionCast(safeForceWakeV25, callback->osafeForceWakeV25)(render, domains);
 }
 
 // Breadcrumb for the display-clock-domain window itself: the driver reads
