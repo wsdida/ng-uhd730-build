@@ -555,6 +555,8 @@ bool Gen11::processKext(KernelPatcher &patcher, size_t index, mach_vm_address_t 
 			{"__ZN19AppleIntelPowerWell22hwSetPowerWellStateAuxEbj",hwSetPowerWellStateAux, this->ohwSetPowerWellStateAux},
 			{"__ZN19AppleIntelPowerWell22hwSetPowerWellStateDDIEbj",hwSetPowerWellStateDDI, this->ohwSetPowerWellStateDDI},
 			{"__ZN31AppleIntelRegisterAccessManager19FastWriteRegister32Emj",FastWriteRegister32, this->oFastWriteRegister32},
+			// VLOCAL19 (wsdida GT1): SafeForceWake ACK observability (read-only, budgeted)
+			{"__ZN31AppleIntelRegisterAccessManager18FastReadRegister32Em",FastReadRegister32V19, this->oFastReadRegister32V19},
 			// VLOCAL12 (wsdida GT1): display-pipe init bisect probes (read-only)
 			{"__ZN24AppleIntelBaseController13probeBootPipeEPbPN17AppleIntelPortHAL3DDIE", probeBootPipeV12, this->oprobeBootPipeV12},
 			{"__ZN24AppleIntelBaseController12getFBFromDDIEj", getFBFromDDIV12, this->ogetFBFromDDIV12},
@@ -916,9 +918,35 @@ bool Gen11::processKext(KernelPatcher &patcher, size_t index, mach_vm_address_t 
 				SYSLOG("ngreen", "Path E: TCON ID patches applied (dbg)");
 			}
 		}
-		
+
+		// VLOCAL19 (wsdida GT1): bound the FB-kext SafeForceWake ACK spins (-ngreenfwcalm).
+		// The FB kext's SafeForceWake waits for the GT forcewake ACK with an UNBOUNDED
+		// tight spin (pause; FastRead ACK; cmpb; jne back) — no counter, no timeout.
+		// The HW kext's counterpart logs "[IGPU] ERROR: SafeForceWake acknowledgement
+		// never received" and PANICS instead. With a real boot pipe (BIOS primary=IGFX),
+		// the first GT wake around WindowServer handoff never observes the ACK and the
+		// machine hard-freezes late in verbose boot — no panic file, no log.
+		// Fix: NOP the loop-back jne so each wait is a single pause+poll instead of an
+		// eternal spin. Patterns verified unique in the Sonoma 16.0 TGL FB binary:
+		//   render  jne 0x64614  + media  jne 0x646b1  (shared pattern, 2 occurrences)
+		//   default jne 0x64751                            (1 occurrence)
+		if (checkKernelArgument("-ngreenfwcalm")) {
+			static const uint8_t kV19FWRMFind[]  = {0x41,0x89,0xC5,0x41,0x83,0xE5,0x01,0x45,0x38,0xE5,0x75,0x99};
+			static const uint8_t kV19FWRMRepl[]  = {0x41,0x89,0xC5,0x41,0x83,0xE5,0x01,0x45,0x38,0xE5,0x90,0x90};
+			static const uint8_t kV19FWDefFind[] = {0x41,0x89,0xC7,0x41,0x83,0xE7,0x01,0x45,0x38,0xE7,0x75,0x9D};
+			static const uint8_t kV19FWDefRepl[] = {0x41,0x89,0xC7,0x41,0x83,0xE7,0x01,0x45,0x38,0xE7,0x90,0x90};
+			LookupPatchPlus const v19Patches[] = {
+				{activeKext, kV19FWRMFind,  kV19FWRMRepl,  arrsize(kV19FWRMFind),  2},
+				{activeKext, kV19FWDefFind, kV19FWDefRepl, arrsize(kV19FWDefFind), 1},
+			};
+			if (LookupPatchPlus::applyAll(patcher, v19Patches, address, size))
+				SYSLOG("ngreen", "VLOCAL19: SafeForceWake spins bounded (render+media x2, default x1)");
+			else
+				SYSLOG("ngreen", "VLOCAL19: SafeForceWake patch FAILED to match — spin loops still unbounded!");
+		}
+
 		return true;
-		
+
 	}else if (kextG11HW.loadIndex == index) {
 		if (this->tglHWLoaded) {
 			DBGLOG("ngreen", "Skipping ICL HW — TGL HW already loaded");
@@ -4192,6 +4220,25 @@ void Gen11::installOpRegionV18()
 	SYSLOG("ngreen", "VLOCAL18: OpRegion @ phys 0x%llx (0x2600 bytes, VBT %u @+0x400) — ASLS written",
 	       phys, (unsigned)sizeof(gVBT));
 	igpu->release();
+}
+
+// VLOCAL19 (wsdida GT1): SafeForceWake ACK observability — read-only FastRead hook.
+// The FB kext polls the GT forcewake ACK registers (0xD84 render / 0xD50 media /
+// 0x130044 default) via FastReadRegister32 inside UNBOUNDED spin loops. Under
+// -ngreenfwcalm the loops are bounded by binary patch; this budgeted hook records
+// what the ACK registers actually return so we can see whether the GT ever
+// acknowledges a forcewake request (and which domain fails).
+uint32_t Gen11::FastReadRegister32V19(void *that, unsigned long addr)
+{
+	uint32_t ret = FunctionCast(FastReadRegister32V19, callback->oFastReadRegister32V19)(that, addr);
+	if (addr == 0xD84 || addr == 0xD50 || addr == 0x130044) {
+		static int v19Count = 0;
+		if (v19Count < 24) {
+			v19Count++;
+			SYSLOG("ngreen", "V19ACK[%d]: reg=0x%lx val=0x%x bit0=%u", v19Count, addr, ret, ret & 1);
+		}
+	}
+	return ret;
 }
 
 void *Gen11::getFBFromDDIV12(AppleIntel::AppleIntelBaseController *that, unsigned int ddi)
