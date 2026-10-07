@@ -4984,6 +4984,16 @@ unsigned long Gen11::start(void *that,void  *param_1)
 	NGreen::callback->writeReg32(FORCEWAKE_RENDER_GEN9, (1 << 16) | 0);
 	NGreen::callback->writeReg32(FORCEWAKE_BLITTER_GEN9, (1 << 16) | 0);
 	
+	// VLOCAL11 (wsdida GT1): native IntelAccelerator::start() completed the full init
+	// (all three GT1 crash points skipped) but still returns false — likely due to the
+	// ERROR_GEN6/RING_MODE quirks seen in V55/V507. Hardware is alive post-start
+	// (V54W watchdog: Master IRQ OK, ERROR_GEN6 cleared). Force-attach behind a gate
+	// so IOKit registers the accelerator node and Metal can bind.
+	if (!ret && checkKernelArgument("-ngreenforceaccel")) {
+		SYSLOG("ngreen", "VLOCAL11: start() returned false — forcing true per -ngreenforceaccel");
+		ret = 1;
+	}
+	
 	return ret;
 }
 
