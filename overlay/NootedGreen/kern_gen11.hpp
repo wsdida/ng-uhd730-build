@@ -1533,6 +1533,12 @@ private:
 	
 	static void FastWriteRegister32(AppleIntel::AppleIntelBaseController *that, unsigned long param_1, uint32_t param_2);
 	mach_vm_address_t oFastWriteRegister32 {};
+
+	// VLOCAL19 (wsdida GT1): SafeForceWake ACK observability — read-only FastRead hook.
+	// The FB kext polls the GT forcewake ACK regs (0xD84 render / 0xD50 media /
+	// 0x130044 default) inside UNBOUNDED spin loops; this logs what they return.
+	static uint32_t FastReadRegister32V19(void *that, unsigned long addr);
+	mach_vm_address_t oFastReadRegister32V19 {};
 	
 	mach_vm_address_t gPlatformInformationList {};
 
