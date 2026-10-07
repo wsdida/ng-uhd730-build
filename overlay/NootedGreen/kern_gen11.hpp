@@ -1571,10 +1571,17 @@ private:
 	static void v24ClockDomainNote(uint32_t v, const char *ctx);
 	// V25: pin the SafeForceWake call site (pass-through, bounded logging).
 	static void safeForceWakeV25(bool render, unsigned int domains);
+	// V27: the two points where AppleIntelBaseController::start() bails out —
+	// TCON software init and cursor-memory (VRAM) allocation. Return values are
+	// passed through untouched; the hooks only read the objects' own fields.
+	static int initTconSWCommonV27(void *that, void *controller);
+	static int hwSetupCursorMemoryV27(void *that);
 	mach_vm_address_t oCamelliaTcon2_new {};
 	mach_vm_address_t oCamelliaTcon2_ctor {};
 	mach_vm_address_t oBanksiaTcon_ctor {};
 	mach_vm_address_t osafeForceWakeV25 {};
+	mach_vm_address_t oinitTconSWCommonV27 {};
+	mach_vm_address_t ohwSetupCursorMemoryV27 {};
 
 	// VLOCAL19 (wsdida GT1): SafeForceWake ACK observability — read-only FastRead hook.
 	// The FB kext polls the GT forcewake ACK regs (0xD84 render / 0xD50 media /
