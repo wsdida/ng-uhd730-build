@@ -1391,7 +1391,7 @@ private:
 	static void *auxPageTableWithOptsV7(void *that, void *acc, void *task);
 	mach_vm_address_t oauxPageTableWithOptsV7 {};
 	// VLOCAL12 (wsdida GT1): FB-side read-only bisect probes — locate display-pipe init failure
-	static void probeBootPipeV12(AppleIntel::AppleIntelBaseController *that, bool *a1, void *a2);
+	static unsigned int probeBootPipeV12(AppleIntel::AppleIntelBaseController *that, bool *a1, void *a2);
 	mach_vm_address_t oprobeBootPipeV12 {};
 	static void *getFBFromDDIV12(AppleIntel::AppleIntelBaseController *that, unsigned int ddi);
 	mach_vm_address_t ogetFBFromDDIV12 {};
