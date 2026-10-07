@@ -2919,25 +2919,35 @@ static inline void v24TconMark(const char *what)
 		  (unsigned long)__builtin_return_address(0));
 }
 
-void Gen11::CamelliaTcon2_new(unsigned long size)
+// Return values are passed through unchanged: the allocation result is what the
+// caller stores into the controller's TCON slot, and dropping it would turn a
+// successful TCON allocation into a null-pointer dereference a few instructions
+// later. Verified against the disassembly: CamelliaTcon2::CamelliaTcon2() and
+// BanksiaTcon::BanksiaTcon() are C1/C2 alias thunks that tail-jump and return
+// nothing, so modelling them as void* is safe on x86-64 (RAX is caller-clobbered
+// and the callers ignore it — 0x5c374 stores the new pointer from operator new).
+void *Gen11::CamelliaTcon2_new(unsigned long size)
 {
 	v24TconMark("CamelliaTcon2::operator new enter");
-	FunctionCast(CamelliaTcon2_new, callback->oCamelliaTcon2_new)(size);
+	void *ret = FunctionCast(CamelliaTcon2_new, callback->oCamelliaTcon2_new)(size);
 	v24TconMark("CamelliaTcon2::operator new exit");
+	return ret;
 }
 
-void Gen11::CamelliaTcon2_ctor(void *that)
+void *Gen11::CamelliaTcon2_ctor(void *that)
 {
 	v24TconMark("CamelliaTcon2::ctor enter");
-	FunctionCast(CamelliaTcon2_ctor, callback->oCamelliaTcon2_ctor)(that);
+	void *ret = FunctionCast(CamelliaTcon2_ctor, callback->oCamelliaTcon2_ctor)(that);
 	v24TconMark("CamelliaTcon2::ctor exit");
+	return ret;
 }
 
-void Gen11::BanksiaTcon_ctor(void *that)
+void *Gen11::BanksiaTcon_ctor(void *that)
 {
 	v24TconMark("BanksiaTcon::ctor enter");
-	FunctionCast(BanksiaTcon_ctor, callback->oBanksiaTcon_ctor)(that);
+	void *ret = FunctionCast(BanksiaTcon_ctor, callback->oBanksiaTcon_ctor)(that);
 	v24TconMark("BanksiaTcon::ctor exit");
+	return ret;
 }
 
 // Breadcrumb for the display-clock-domain window itself: the driver reads
