@@ -37,13 +37,42 @@ bool gVLOCAL4TGLFBLoaded = false;
 // (IOLog) — so the exact spot where display init stopped becomes visible on
 // screen, without needing a panic or a file dump.
 // ============================================================================
-struct NGTr20Entry { uint32_t addr; uint32_t val; uint8_t wr; uint8_t pad[3]; };
+struct NGTr20Entry { uint32_t addr; uint32_t val; uint64_t ra; uint8_t wr; uint8_t pad[7]; };
 static NGTr20Entry gTr20[64];
 static volatile int      gTr20Idx    = 0;
 static volatile uint64_t gTr20LastNs = 0;
 static volatile uint64_t gV20ArmNs   = 0;
 static volatile int      gV20Armed   = 0;
 static volatile int      gV20Dumped  = 0;
+
+// ============================================================================
+// VLOCAL22 (wsdida GT1): why V20 stayed silent, and what replaces it.
+//
+// V20 declared a stall only when NO display-range MMIO happened for 6 s. But the
+// very freeze we are hunting is a *spin that keeps reading a register*: every read
+// refreshed gTr20LastNs, so the "silence" never arrived and the watchdog never
+// fired — which is exactly what the IMG_6172 frozen console shows (no V20STALL /
+// V21 banner at all). Two new detectors instead:
+//
+//   SPIN  — the same (caller, register) pair keeps being accessed for > 2 s with
+//           the ring still advancing. Bounded polls never look like this.
+//   IDLE  — the ring has not advanced at all for > 10 s.
+//
+// The ring also now records EVERY address (not just the display windows) plus the
+// caller's return address, so force-wake (0xD84/0x13805C) and fuse (0x454xx)
+// spins are captured too. A 3 s heartbeat line keeps the newest state visible on
+// the verbose console, and STEPS mark each display-path function entry.
+// ============================================================================
+static volatile int32_t   gV22PairRa   = 0x7fffffff;   // caller of the current pair
+static volatile uint32_t  gV22PairAddr = 0xffffffff;   // register of the current pair
+static volatile uint64_t  gV22PairNs   = 0;            // when the current pair started
+static volatile uint32_t  gV22PairCnt  = 0;            // how many times it repeated
+static volatile int       gV22SeenIdx  = 0;            // ring index seen last tick
+static volatile uint64_t  gV22IdleNs   = 0;            // when the ring last advanced
+static volatile int       gV22Reason   = 0;            // 0 none, 1 SPIN, 2 IDLE
+static volatile int       gV22HbTick   = 0;            // heartbeat divider
+static volatile int32_t   gV22Step     = -1;           // last display-path step id
+static volatile int       gV22RefShown = 0;
 
 // ============================================================================
 // VLOCAL21 (wsdida GT1): auto-escape — never require a manual power cut.
@@ -68,18 +97,43 @@ static inline uint64_t v20NowNs() {
     return t;
 }
 
-static inline void v20Trace(uint32_t addr, uint32_t val, uint8_t wr) {
+// VLOCAL22: full-range MMIO trace. Records address, value, direction and the
+// caller's return address for the driving code (Apple's FB kext), so a frozen
+// trace can be mapped back to an exact function/instruction offline.
+static inline void v22Trace(uint32_t addr, uint32_t val, uint8_t wr, void *ra) {
     if (!gV20Armed) return;
-    // display engine blocks only: transcoder/pipe/DDI/AUX (0x40000-0x7FFFF)
-    // plus the Type-C subsystem window (0x160000-0x16FFFF)
-    if (!((addr >= 0x40000 && addr < 0x80000) || (addr >= 0x160000 && addr < 0x170000))) return;
+    uint64_t now = v20NowNs();
     int i = gTr20Idx;
-    gTr20[i & 63].addr = addr;
-    gTr20[i & 63].val  = val;
-    gTr20[i & 63].wr   = wr;
-    gTr20[i & 63].pad[0] = gTr20[i & 63].pad[1] = gTr20[i & 63].pad[2] = 0;
+    NGTr20Entry *e = &gTr20[i & 63];
+    e->addr = addr;
+    e->val  = val;
+    e->ra   = (uint64_t)(uintptr_t)ra;
+    e->wr   = wr;
     gTr20Idx = i + 1;
-    gTr20LastNs = v20NowNs();
+    gTr20LastNs = now;
+    // SPIN detector state: restart the clock whenever a different (caller, reg)
+    // pair shows up. A bounded poll always changes pair (or ends) quickly.
+    if (addr != gV22PairAddr || (uint32_t)(uintptr_t)ra != (uint32_t)gV22PairRa) {
+        gV22PairAddr = addr;
+        gV22PairRa   = (int32_t)(uint32_t)(uintptr_t)ra;
+        gV22PairNs   = now;
+        gV22PairCnt  = 1;
+    } else if (gV22PairCnt < 0x7fffffffu) {
+        gV22PairCnt++;
+    }
+}
+
+// VLOCAL22: display-path breadcrumbs. Printed to the verbose console so the last
+// line on a frozen screen names the function the driver died in.
+// always_inline is required: __builtin_return_address(0) must evaluate inside the
+// *hook*, so the printed ra is Apple's call site, not this helper's.
+static inline __attribute__((always_inline)) void ngStep(int id, const char *name) {
+    static int last = -1;
+    if (last == id) return;
+    last = id;
+    gV22Step = id;
+    IOLog("ngreen: NGRN STEP[%d] %s ra=0x%lx\n", id, name,
+          (unsigned long)__builtin_return_address(0));
 }
 
 
@@ -520,6 +574,23 @@ bool Gen11::processKext(KernelPatcher &patcher, size_t index, mach_vm_address_t 
 		// VLOCAL18b: install the OpRegion at kext-load time — the earliest point,
 		// before ANY Apple code could read ASLS. Idempotent (static done flag).
 		installOpRegionV18();
+
+		// VLOCAL22 (wsdida GT1): force-arm the display watchdog independent of
+		// boot-pipe detection (-ngreenngx). Needed because the iGPU console boot can
+		// drive the display even when probeBootPipe reports 0xffff — in that case the
+		// V20 arming point never ran, which is one more reason the old watchdog was
+		// silent on the frozen boots.
+		if (checkKernelArgument("-ngreenngx") && !gV20Armed) {
+			uint64_t t = v20NowNs();
+			gV22SeenIdx = 0;
+			gV22PairNs  = t;
+			gV22IdleNs  = t;
+			gTr20LastNs = t;
+			gV20ArmNs   = t;
+			gV20Armed   = 1;
+			IOLog("ngreen: VLOCAL22: display watchdog force-armed (-ngreenngx)\n");
+			SYSLOG("ngreen", "VLOCAL22: display watchdog force-armed (-ngreenngx)");
+		}
 		
 		bool isprod=false;
 		auto prod=patcher.solveSymbol(index, "__ZN24AppleIntelBaseController5startEP9IOService", address, size);
@@ -673,6 +744,21 @@ bool Gen11::processKext(KernelPatcher &patcher, size_t index, mach_vm_address_t 
 			//{"__ZN21AppleIntelFramebuffer16enableControllerEv", isPanelPowerOn},
 		};
 		PANIC_COND(!RouteRequestPlus::routeAll(patcher, index, requests, address, size), "ngreen","Failed to route dp symbols");
+
+		// VLOCAL22 (wsdida GT1): display-path breadcrumb routes. Non-fatal on purpose —
+		// if one symbol is absent we lose that single breadcrumb instead of failing the
+		// whole kext load. All three are pure passthroughs (see their definitions).
+		{
+			RouteRequestPlus v22Requests[] = {
+				{"__ZN24AppleIntelBaseController9hwSetModeEP21AppleIntelFramebufferP21AppleIntelDisplayPathPK29IODetailedTimingInformationV2", hwSetModeV22, this->ohwSetModeV22},
+				{"__ZN24AppleIntelBaseController16enableControllerEP21AppleIntelFramebuffer", enableControllerV22, this->oenableControllerV22},
+				{"__ZN24AppleIntelBaseController16setupDefaultDBUFEv", setupDefaultDBUFV22, this->osetupDefaultDBUFV22},
+			};
+			if (!RouteRequestPlus::routeAll(patcher, index, v22Requests, address, size))
+				SYSLOG("ngreen", "VLOCAL22: some breadcrumb routes missing (non-fatal)");
+			else
+				SYSLOG("ngreen", "VLOCAL22: breadcrumb routes OK (hwSetMode / enableController / setupDefaultDBUF)");
+		}
 		
 		if (isprod) {
 			RouteRequestPlus requests[] = {
@@ -2399,6 +2485,7 @@ void Gen11::disableDisplayEngine(AppleIntel::AppleIntelBaseController *that)
 
 void Gen11::enableDisplayEngine(AppleIntel::AppleIntelBaseController *that)
 {
+	ngStep(8, "EnableDisplayEngine");   // VLOCAL22 breadcrumb
 	getMember<void *>(that, 0x78) = ccont;
 	FunctionCast(enableDisplayEngine, callback->oenableDisplayEngine)(that );
 }
@@ -2557,6 +2644,7 @@ IOReturn Gen11::wrapICLReadAUX(void *that, uint32_t address, void *buffer, uint3
 }
 
 void Gen11::getOnlineInfo(AppleIntel::AppleIntelFramebuffer *that, AppleIntel::AppleIntelDisplayPath *displayPath, unsigned char *online, unsigned char *changed) {
+	ngStep(3, "getOnlineInfo");   // VLOCAL22 breadcrumb
 	// V96 removed (was: force *online=1 for fbId==0). Confirmed no-op on this hardware:
 	// baseline log shows Apple's getOnlineInfo natively reports orig=1 for FB0, so the
 	// V96 forcing was already redundant. Keeping the wrapper as a logging shell so we
@@ -2736,13 +2824,40 @@ void Gen11::hwSetPowerWellStateAux(AppleIntel::AppleIntelBaseController *that, b
 
 void Gen11::hwSetPowerWellStateDDI(AppleIntel::AppleIntelBaseController *that, bool param_1, uint param_2)
 {
+	ngStep(7, "PowerWell::DDI");   // VLOCAL22 breadcrumb
 	getMember<void *>(that, 0x78) = ccont;
 	FunctionCast(hwSetPowerWellStateDDI, callback->ohwSetPowerWellStateDDI)(that,param_1,param_2);
 }
 
+// ============================================================================
+// VLOCAL22 (wsdida GT1): display-path breadcrumb passthroughs.
+// Each one prints a step line and then calls Apple's original with the exact same
+// arguments — pure observation, zero behaviour change. The verbose console keeps
+// the most recent step at the bottom; if the box freezes inside the display
+// takeover, the last visible NGRN STEP line names the function it died in.
+// ============================================================================
+void Gen11::hwSetModeV22(void *that, void *fb, void *dp, void *timing)
+{
+	ngStep(20, "BaseController::hwSetMode(FB,DP,timing)");
+	FunctionCast(hwSetModeV22, callback->ohwSetModeV22)(that, fb, dp, timing);
+}
+
+void Gen11::enableControllerV22(void *that, void *fb)
+{
+	ngStep(21, "BaseController::enableController(FB)");
+	FunctionCast(enableControllerV22, callback->oenableControllerV22)(that, fb);
+}
+
+void Gen11::setupDefaultDBUFV22(void *that)
+{
+	ngStep(22, "BaseController::setupDefaultDBUF");
+	FunctionCast(setupDefaultDBUFV22, callback->osetupDefaultDBUFV22)(that);
+}
+
 void Gen11::FastWriteRegister32(AppleIntel::AppleIntelBaseController *that, unsigned long param_1, uint32_t param_2)
 {
-	v20Trace((uint32_t)param_1, param_2, 1);   // VLOCAL20: display-range MMIO trace
+	void *ngRa = __builtin_return_address(0);   // caller inside Apple's FB kext
+	v22Trace((uint32_t)param_1, param_2, 1, ngRa);   // VLOCAL22: full-range MMIO trace
 	// V99D: Diagnose — log all FastWrite calls near display engine range on first boot
 	// to understand what addresses/values flow through this path.
 	{
@@ -3318,6 +3433,7 @@ int Gen11::handleLinkIntegrityCheck()
 
 void Gen11::hwInitializeCState(AppleIntel::AppleIntelBaseController *that)
 {
+	ngStep(4, "hwInitializeCState");   // VLOCAL22 breadcrumb
 	SYSLOG("ngreen", "NB-BUILD-V50-ALLOW-METAL");
 
 	int origB48 = getMember<int>(that, 0xB48);
@@ -3670,6 +3786,7 @@ void NGreen::adlpDcExit(const char *caller) {
 
 void Gen11::AppleIntelPowerWellinit(AppleIntel::AppleIntelPowerWell *that, AppleIntel::AppleIntelBaseController *param_1)
 {
+	ngStep(5, "PowerWell::init");   // VLOCAL22 breadcrumb
 	ccont = param_1->fRegCachePool;
 
 	FunctionCast(AppleIntelPowerWellinit, callback->oAppleIntelPowerWellinit)(that, param_1);
@@ -3793,6 +3910,7 @@ void Gen11::prepareToExitSleep(AppleIntel::AppleIntelFramebuffer *that)
 
 bool Gen11::AppleIntelBaseControllerstart(AppleIntel::AppleIntelBaseController *that, IOService *param_1)
 {
+	ngStep(1, "FBController::start");   // VLOCAL22 breadcrumb
 	// V25: Display workarounds BEFORE start (no ForceWake needed for display regs 0x4xxxx+).
 	// GT workarounds moved AFTER start (ForceWake must be held for GT regs 0x0-0x7FFF).
 	
@@ -3927,6 +4045,7 @@ void Gen11::sanitizeCDClockFrequency(AppleIntel::AppleIntelBaseController *that)
 /*
 void Gen11::initCDClock(void *that)
 {
+	ngStep(10, "initCDClock(override)");   // VLOCAL22 breadcrumb
 	// Mirrors AppleIntelFramebufferController::initCDClock decompiled flow.
 	// DSSM bits [31:29] encode the reference clock frequency (0=24MHz, 1=19.2MHz, 2=38.4MHz).
 	// The check < 0x60000000 ensures bits[31:29] < 3 (i.e. a valid reference).
@@ -3960,6 +4079,7 @@ void Gen11::initCDClock(void *that)
 */
 void Gen11::initCDClock(AppleIntel::AppleIntelBaseController *that)
 {
+	ngStep(9, "initCDClock(passthrough)");   // VLOCAL22 breadcrumb
 	return FunctionCast(initCDClock, callback->oinitCDClock)(that);
 }
 
@@ -3982,6 +4102,7 @@ uint8_t Gen11::hwRegsNeedUpdate
 		   const IODetailedTimingInformationV2 *param_4,
 		   AppleIntel::SCALERPARAMS *param_5)
 {
+	ngStep(11, "hwRegsNeedUpdate (inside hwSetMode)");   // VLOCAL22 breadcrumb
 	// ADL-P DC exit: restore power wells and context before Apple writes registers.
 	if (NGreen::callback->dmcIsAdlp)
 		NGreen::callback->adlpDcExit("hwRNU");
@@ -4164,6 +4285,7 @@ unsigned long Gen11::telemetryCreateManagerV10(void *that, unsigned int flag)
 // 0xffff on error paths) — the void declaration caused the VLOCAL12 boot freeze.
 unsigned int Gen11::probeBootPipeV12(AppleIntel::AppleIntelBaseController *that, bool *a1, void *a2)
 {
+	ngStep(0, "probeBootPipe");   // VLOCAL22 breadcrumb
 	SYSLOG("ngreen", "VLOCAL13: probeBootPipe enter");
 	unsigned int ret = FunctionCast(probeBootPipeV12, callback->oprobeBootPipeV12)(that, a1, a2);
 	SYSLOG("ngreen", "VLOCAL13: probeBootPipe exit ret=0x%x", ret);
@@ -4183,9 +4305,13 @@ unsigned int Gen11::probeBootPipeV12(AppleIntel::AppleIntelBaseController *that,
 	// only configuration in which the display takeover path runs (and where the
 	// unbounded waits can be reached). Arm the stall detector + MMIO trace here.
 	if (ret != 0xffff && !gV20Armed) {
+		uint64_t t = v20NowNs();
 		gV20Armed = 1;
-		gV20ArmNs = v20NowNs();
-		gTr20LastNs = gV20ArmNs;
+		gV20ArmNs = t;
+		gTr20LastNs = t;
+		gV22PairNs = t;
+		gV22IdleNs = t;
+		IOLog("ngreen: VLOCAL22: real boot pipe (ret=%u) — display watchdog ARMED\n", ret);
 		SYSLOG("ngreen", "VLOCAL20: real boot pipe (ret=%u) — display stall detector ARMED", ret);
 	}
 	return ret;
@@ -4204,8 +4330,9 @@ unsigned int Gen11::probeBootPipeV12(AppleIntel::AppleIntelBaseController *that,
 // *(this->0x50 + offset), 32-bit return (movl %r14d,%eax).
 uint32_t Gen11::ReadRegister32V15(void *that, unsigned long addr)
 {
+	void *ngRa = __builtin_return_address(0);
 	uint32_t ret = FunctionCast(ReadRegister32V15, callback->oReadRegister32V15)(that, addr);
-	v20Trace((uint32_t)addr, ret, 0);   // VLOCAL20: display-range MMIO trace
+	v22Trace((uint32_t)addr, ret, 0, ngRa);   // VLOCAL22: full-range MMIO trace
 	// VLOCAL16: targeted read trace — only pipe/panel regs (0x60000-0x64FFF) and
 	// fuses (0x454xx), so the log budget isn't wasted on unrelated early reads.
 	static unsigned long v16LogCount = 0;
@@ -4227,6 +4354,7 @@ uint32_t Gen11::ReadRegister32V15(void *that, unsigned long addr)
 // adoption. Gate: -ngreenskipbootdisp.
 unsigned int Gen11::setupBootDisplayV17(AppleIntel::AppleIntelBaseController *that)
 {
+	ngStep(2, "setupBootDisplay");   // VLOCAL22 breadcrumb
 	if (checkKernelArgument("-ngreenskipbootdisp")) {
 		SYSLOG("ngreen", "VLOCAL17: setupBootDisplay SKIPPED per -ngreenskipbootdisp (ports absent, VBT missing)");
 		return 0;
@@ -4325,8 +4453,9 @@ void Gen11::installOpRegionV18()
 // acknowledges a forcewake request (and which domain fails).
 uint32_t Gen11::FastReadRegister32V19(void *that, unsigned long addr)
 {
+	void *ngRa = __builtin_return_address(0);
 	uint32_t ret = FunctionCast(FastReadRegister32V19, callback->oFastReadRegister32V19)(that, addr);
-	v20Trace((uint32_t)addr, ret, 0);   // VLOCAL20: display-range MMIO trace
+	v22Trace((uint32_t)addr, ret, 0, ngRa);   // VLOCAL22: full-range MMIO trace
 	if (addr == 0xD84 || addr == 0xD50 || addr == 0x130044 || addr == 0x13805C) {
 		static int v19Count = 0;
 		if (v19Count < 24) {
@@ -4342,6 +4471,7 @@ uint32_t Gen11::FastReadRegister32V19(void *that, unsigned long addr)
 
 void *Gen11::getFBFromDDIV12(AppleIntel::AppleIntelBaseController *that, unsigned int ddi)
 {
+	ngStep(6, "getFBFromDDI");   // VLOCAL22 breadcrumb
 	SYSLOG("ngreen", "VLOCAL12: getFBFromDDI enter ddi=%u", ddi);
 	void *ret = FunctionCast(getFBFromDDIV12, callback->ogetFBFromDDIV12)(that, ddi);
 	SYSLOG("ngreen", "VLOCAL12: getFBFromDDI exit ddi=%u ret=%p", ddi, ret);
@@ -8666,26 +8796,67 @@ void Gen11::v60GpuHealthMonitor(thread_call_param_t param0, thread_call_param_t 
 void Gen11::v20StallWatch(thread_call_param_t param0, thread_call_param_t param1) {
 	uint64_t now = v20NowNs();
 	if (gV20Armed && !gV20Dumped) {
-		uint64_t last = gTr20LastNs ? gTr20LastNs : gV20ArmNs;
-		uint64_t idleMs = (now > last) ? (now - last) / 1000000ULL : 0;
-		if (idleMs > 6000 && gTr20Idx > 16) {
+		int idx = gTr20Idx;
+		if (idx != gV22SeenIdx) {          // ring advanced → still touching MMIO
+			gV22SeenIdx = idx;
+			gV22IdleNs  = now;
+		}
+		uint64_t idleMs = (now > gV22IdleNs) ? (now - gV22IdleNs) / 1000000ULL : 0;
+		uint64_t pairMs = (now > gV22PairNs) ? (now - gV22PairNs) / 1000000ULL : 0;
+		uint64_t armMs  = (now > gV20ArmNs)  ? (now - gV20ArmNs)  / 1000000ULL : 0;
+
+		// ---- VLOCAL22 detectors (see the header comment on why V20 was blind) ----
+		// SPIN: one (caller, register) pair hammered > 20000 times over more than 3 s
+		// while the ring keeps growing. A bounded poll (or DP link training, which
+		// moves between registers) never produces this signature.
+		if (idx > 8 && idleMs < 1500 && pairMs > 3000 && gV22PairCnt > 20000) {
+			gV22Reason = 1;
 			gV20Dumped = 1;
+		// IDLE: the driver stopped touching anything at all for > 10 s.
+		} else if (idx > 8 && idleMs > 10000) {
+			gV22Reason = 2;
+			gV20Dumped = 1;
+		}
+
+		if (gV20Dumped) {
 			int n = gTr20Idx;
 			int cnt = (n < 40) ? n : 40;
-			SYSLOG("ngreen", "V20STALL: display init silent for %llu ms after %d accesses — dumping last %d",
-				   (unsigned long long)idleMs, n, cnt);
-			IOLog("ngreen: V20STALL: display init silent %llums, last %d accesses:\n",
-				  (unsigned)(idleMs > 99999 ? 99999 : idleMs), cnt);
+			SYSLOG("ngreen", "V22STALL[%s]: idx=%d idle=%llums pair=%llums cnt=%u ra=0x%lx reg=0x%05x step=%d",
+				   gV22Reason == 1 ? "SPIN" : "IDLE", n, (unsigned long long)idleMs,
+				   (unsigned long long)pairMs, (unsigned)gV22PairCnt,
+				   (unsigned long)(uint32_t)gV22PairRa, (unsigned)gV22PairAddr, (int)gV22Step);
+			IOLog("ngreen: V22STALL[%s] idx=%d idle=%llums pair=%llums cnt=%u ra=0x%lx reg=0x%05x step=%d\n",
+				  gV22Reason == 1 ? "SPIN" : "IDLE", n,
+				  (unsigned)(idleMs > 999999 ? 999999 : idleMs),
+				  (unsigned)(pairMs > 999999 ? 999999 : pairMs), (unsigned)gV22PairCnt,
+				  (unsigned long)(uint32_t)gV22PairRa, (unsigned)gV22PairAddr, (int)gV22Step);
 			for (int k = 0; k < cnt; k++) {
 				NGTr20Entry *e = &gTr20[(n - cnt + k) & 63];
-				SYSLOG("ngreen", "V20TRACE[%d/%d]: %s 0x%05x = 0x%08x",
-					   k + 1, cnt, e->wr ? "WR" : "RD", e->addr, e->val);
-				IOLog("ngreen: V20TRACE[%d/%d]: %s 0x%05x = 0x%08x\n",
-					  k + 1, cnt, e->wr ? "WR" : "RD", e->addr, e->val);
+				SYSLOG("ngreen", "V22TRACE[%d/%d]: %s 0x%05x = 0x%08x ra=0x%llx",
+					   k + 1, cnt, e->wr ? "WR" : "RD", e->addr, e->val,
+					   (unsigned long long)e->ra);
+				IOLog("ngreen: V22TRACE[%d/%d]: %s 0x%05x = 0x%08x ra=0x%llx\n",
+					  k + 1, cnt, e->wr ? "WR" : "RD", e->addr, e->val,
+					  (unsigned long long)e->ra);
 			}
-			SYSLOG("ngreen", "V20STALL: trace end (idx=%d)", n);
-			IOLog("ngreen: V20STALL: trace end (idx=%d)\n", n);
+			SYSLOG("ngreen", "V22STALL: trace end (idx=%d)", n);
+			IOLog("ngreen: V22STALL: trace end (idx=%d)\n", n);
+		} else if ((++gV22HbTick % 3) == 0) {
+			// 3 s heartbeat: the newest state stays visible on the verbose console,
+			// so a photo of a frozen screen always carries the last register + caller.
+			NGTr20Entry *e = &gTr20[(idx - 1) & 63];
+			IOLog("ngreen: NGRN HB t=%us idx=%d step=%d last %s 0x%05x=0x%08x ra=0x%lx pair=%llums cnt=%u\n",
+				  (unsigned)(armMs / 1000), idx, (int)gV22Step,
+				  e->wr ? "WR" : "RD", e->addr, e->val, (unsigned long)e->ra,
+				  (unsigned long long)pairMs, (unsigned)gV22PairCnt);
 		}
+	}
+
+	// Auto-disarm 180 s after arming so a normal desktop session is not spammed
+	// with heartbeats (only relevant when forced on with -ngreenngx).
+	if (gV20Armed && !gV20Dumped && (now > gV20ArmNs) && (now - gV20ArmNs) > 180000000000ULL) {
+		gV20Armed = 0;
+		IOLog("ngreen: NGRN: display watchdog disarmed after 180s\n");
 	}
 	// ---- VLOCAL21: auto-escape countdown ------------------------------------
 	// Fires only after the V20 detector actually tripped (gV20Dumped) on a real
