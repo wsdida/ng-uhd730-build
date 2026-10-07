@@ -1390,6 +1390,17 @@ private:
 	mach_vm_address_t oinitStampAndScratchPagesV7 {};
 	static void *auxPageTableWithOptsV7(void *that, void *acc, void *task);
 	mach_vm_address_t oauxPageTableWithOptsV7 {};
+	// VLOCAL12 (wsdida GT1): FB-side read-only bisect probes — locate display-pipe init failure
+	static void probeBootPipeV12(AppleIntel::AppleIntelBaseController *that, bool *a1, void *a2);
+	mach_vm_address_t oprobeBootPipeV12 {};
+	static void *getFBFromDDIV12(AppleIntel::AppleIntelBaseController *that, unsigned int ddi);
+	mach_vm_address_t ogetFBFromDDIV12 {};
+	static void *getFBFromPipeV12(AppleIntel::AppleIntelBaseController *that, unsigned int pipe);
+	mach_vm_address_t ogetFBFromPipeV12 {};
+	static void FBMgrInitV12(AppleIntel::AppleIntelBaseController *that);
+	mach_vm_address_t oFBMgrInitV12 {};
+	static void initPMRegistersV12(AppleIntel::AppleIntelBaseController *that);
+	mach_vm_address_t oinitPMRegistersV12 {};
 	static unsigned long telemetryCreateManagerV10(void *that, unsigned int flag);
 	mach_vm_address_t otelemetryCreateManagerV10 {};
 
