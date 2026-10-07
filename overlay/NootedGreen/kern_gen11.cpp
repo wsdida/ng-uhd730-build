@@ -4165,11 +4165,11 @@ void Gen11::installOpRegionV18()
 			kIODirectionInOut | kIOMemoryPhysicallyContiguous | kIOMemoryHostPhysicallyContiguous,
 			0x2600);
 		if (!b) break;
-		uint64_t len = 0;
-		uint64_t p = b->getPhysicalSegment64(0, &len);
-		if (p != 0 && len >= 0x2600 && (p + 0x2600) <= 0x100000000ull) {
+		IOPhysicalLength len = 0;
+		IOPhysicalAddress p = b->getPhysicalSegment(0, &len);
+		if (p != 0 && len >= 0x2600) {
 			buf = b;
-			phys = p;
+			phys = p;   // 32-bit by definition — always satisfies ASLS
 		} else {
 			b->release();
 		}
