@@ -1535,6 +1535,17 @@ private:
 	static void FastWriteRegister32(AppleIntel::AppleIntelBaseController *that, unsigned long param_1, uint32_t param_2);
 	mach_vm_address_t oFastWriteRegister32 {};
 
+	// VLOCAL22 (wsdida GT1): display-path breadcrumb passthroughs. Log-only — the
+	// original is always invoked with unchanged arguments, so behaviour is identical
+	// to stock. All three return void in the TGL FB kext and take only pointer /
+	// integer arguments, so the void* declarations below are ABI-exact.
+	static void hwSetModeV22(void *that, void *fb, void *dp, void *timing);
+	static void enableControllerV22(void *that, void *fb);
+	static void setupDefaultDBUFV22(void *that);
+	mach_vm_address_t ohwSetModeV22 {};
+	mach_vm_address_t oenableControllerV22 {};
+	mach_vm_address_t osetupDefaultDBUFV22 {};
+
 	// VLOCAL19 (wsdida GT1): SafeForceWake ACK observability — read-only FastRead hook.
 	// The FB kext polls the GT forcewake ACK regs (0xD84 render / 0xD50 media /
 	// 0x130044 default) inside UNBOUNDED spin loops; this logs what they return.
