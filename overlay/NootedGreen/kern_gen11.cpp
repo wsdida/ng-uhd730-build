@@ -771,6 +771,23 @@ bool Gen11::processKext(KernelPatcher &patcher, size_t index, mach_vm_address_t 
 			else
 				SYSLOG("ngreen", "VLOCAL22: breadcrumb routes OK (hwSetMode / enableController / setupDefaultDBUF)");
 		}
+
+		// VLOCAL24 (wsdida GT1): TCON / AUX bring-up window. The V23 trace ended with
+		// the CHICKEN_DCPR_1 rewrite and then nothing — the following CamelliaTcon2 /
+		// BanksiaTcon bring-up runs DDC/AUX I2C, which never enters the MMIO window we
+		// trace, so the stall was invisible. Mark entry/exit of that window.
+		// Non-fatal by design: a missing symbol costs one breadcrumb, not the kext.
+		{
+			RouteRequestPlus v24Requests[] = {
+				{"__ZN13CamelliaTcon2nwEm", CamelliaTcon2_new, this->oCamelliaTcon2_new},
+				{"__ZN13CamelliaTcon2C1Ev", CamelliaTcon2_ctor, this->oCamelliaTcon2_ctor},
+				{"__ZN11BanksiaTconC1Ev", BanksiaTcon_ctor, this->oBanksiaTcon_ctor},
+			};
+			if (!RouteRequestPlus::routeAll(patcher, index, v24Requests, address, size))
+				SYSLOG("ngreen", "V24: some TCON routes missing (non-fatal)");
+			else
+				SYSLOG("ngreen", "V24: TCON routes OK (CamelliaTcon2 new/ctor, BanksiaTcon ctor)");
+		}
 		
 		if (isprod) {
 			RouteRequestPlus requests[] = {
@@ -2866,6 +2883,78 @@ void Gen11::setupDefaultDBUFV22(void *that)
 	FunctionCast(setupDefaultDBUFV22, callback->osetupDefaultDBUFV22)(that);
 }
 
+// ============================================================================
+// VLOCAL24: TCON / AUX bring-up window instrumentation.
+//
+// V23 forensics (Lilu-20261007-172320.txt) nailed the stall to this exact spot:
+//
+//   step=4  hwInitializeCState() completed (22 pipe/DSM writes 0x831ec..0x83240)
+//   ...     AppleIntelBaseController::start() read CHICKEN_DCPR_1 (0x46430) = 0x2008
+//   ...     and rewrote it through the register-manager vtable with (value | 0x2000)
+//   >>>     ZERO further MMIO for > 10 s. Steps 5..22 never ran:
+//           PowerWell::init, getFBFromDDI, PowerWell::DDI, EnableDisplayEngine,
+//           initCDClock, hwRegsNeedUpdate, hwSetMode, enableController,
+//           setupDefaultDBUF — the entire mode-set never happened, so the
+//           framebuffer never came up and the console froze on its last frame.
+//
+// The next code after that write (FB offsets 0x5c2f4..0x5c417) is:
+//     0x5c306  test cameliav == 2  (Camellia2) / == 3 (Banksia)   <- platform info
+//     0x5c364  CamelliaTcon2::operator new(0x270)
+//     0x5c36f  CamelliaTcon2::CamelliaTcon2()
+//     0x5c398  vtable +0x120  -> TCON bring-up (AUX / DDC I2C, NOT MMIO)
+//     0x5c408  vtable +0x688
+//     0x5c417  vtable +0x128
+// A TCON object is created and initialised through vtable calls that perform
+// DDC/AUX I2C transactions. Those never touch the MMIO window our trace covers,
+// which is exactly why the IDLE detector fired with a "silent" ring.
+//
+// The kext already routes hwSetupCursorMemory / hwSetupDSBMemory / hwGetMemoryLayoutEFI,
+// so we hook the TCON classes too. Their vtable slot +0x120 is the bring-up we must
+// see enter and leave.
+// ============================================================================
+
+static inline void v24TconMark(const char *what)
+{
+	IOLog("ngreen: V24 TCON %s ra=0x%lx\n", what,
+		  (unsigned long)__builtin_return_address(0));
+}
+
+void Gen11::CamelliaTcon2_new(unsigned long size)
+{
+	v24TconMark("CamelliaTcon2::operator new enter");
+	FunctionCast(CamelliaTcon2_new, callback->oCamelliaTcon2_new)(size);
+	v24TconMark("CamelliaTcon2::operator new exit");
+}
+
+void Gen11::CamelliaTcon2_ctor(void *that)
+{
+	v24TconMark("CamelliaTcon2::ctor enter");
+	FunctionCast(CamelliaTcon2_ctor, callback->oCamelliaTcon2_ctor)(that);
+	v24TconMark("CamelliaTcon2::ctor exit");
+}
+
+void Gen11::BanksiaTcon_ctor(void *that)
+{
+	v24TconMark("BanksiaTcon::ctor enter");
+	FunctionCast(BanksiaTcon_ctor, callback->oBanksiaTcon_ctor)(that);
+	v24TconMark("BanksiaTcon::ctor exit");
+}
+
+// Breadcrumb for the display-clock-domain window itself: the driver reads
+// CHICKEN_DCPR_1 and immediately rewrites it with bit 13 forced on. If that write
+// gates the display clock domain, the very next thing (TCON/AUX) stalls. Log the
+// value on every read of 0x46430 during the first 40 occurrences so a photo of the
+// frozen console shows exactly what the last clock-domain write was.
+void Gen11::v24ClockDomainNote(uint32_t v, const char *ctx)
+{
+	static int n = 0;
+	if (n < 40) {
+		n++;
+		SYSLOG("ngreen", "V24[%d] CHICKEN_DCPR_1(0x46430)=0x%08x via %s bit13=%u bit7=%u",
+			   n, v, ctx, (v >> 13) & 1u, (v >> 7) & 1u);
+	}
+}
+
 void Gen11::FastWriteRegister32(AppleIntel::AppleIntelBaseController *that, unsigned long param_1, uint32_t param_2)
 {
 	void *ngRa = __builtin_return_address(0);   // caller inside Apple's FB kext
@@ -3365,7 +3454,8 @@ void Gen11::initPlatformWorkarounds(AppleIntel::AppleIntelBaseController *that)
 		NGreen::callback->intel_de_rmw(0x46540, 0, 1u << 17);
 
 		// Bspec/49189 ADL-P init — CLEAR DDI_CLOCK_REG_ACCESS = REG_BIT(7) in GEN8_CHICKEN_DCPR_1 (0x46430)
-		NGreen::callback->intel_de_rmw(0x46430, 1u << 7, 0);
+		// V24: handled further below with bit-13 preservation — doing it here raced with
+		// Apple's own TCON/clock-domain bring-up (see the V24 block below).
 
 		// PIPE_CHICKEN Pipe A (0x70038):
 		//   bit 30 = UNDERRUN_RECOVERY_DISABLE_ADLP — required on Display 13+
@@ -3377,6 +3467,32 @@ void Gen11::initPlatformWorkarounds(AppleIntel::AppleIntelBaseController *that)
 		// Display 13 (per icl_display_core_init in Linux i915). Without this, fatal
 		// error events can trigger pipeline restart loops.
 		NGreen::callback->writeReg32(0x4421C, 0xFFFFFFFFu);
+
+		// ── V24 ──────────────────────────────────────────────────────────────────
+		// CHICKEN_DCPR_1 (0x46430) is a DISPLAY-CLOCK-DOMAIN register: AppleDisplay-
+		// ClockRegAccess (bit 13) gates whether the display engine may touch the
+		// DDI/pipe clock registers at all. V23 evidence: this exact register was read
+		// back as 0x2008 by AppleIntelBaseController::start() at FB offset 0x5c2d3 and
+		// immediately rewritten through the vtable at 0x5c2ee with (value | 0x2000),
+		// after which the driver produced ZERO further MMIO for >10 s and never reached
+		// PowerWell::init (step 5). The subsequent code window allocates a CamelliaTcon2
+		// and calls its vtable init — i.e. the stall begins exactly at the
+		// TCON/AUX bring-up that depends on this clock domain being accessible.
+		//
+		// Clearing DDI_CLOCK_REG_ACCESS (bit 7) is correct per Bspec/49189, but Apple
+		// re-asserts bit 13 from the platform info path, and on this spoofed RPL setup
+		// the two writes race with the TCON bring-up. Keep bit 7 CLEAR but make sure
+		// bit 13 (AppleDisplayClockRegAccess) is left exactly as the firmware left it —
+		// we must not be the reason the display clock domain stays gated.
+		uint32_t dcpr1 = NGreen::callback->readReg32(0x46430);
+		uint32_t dcpr1Safe = (dcpr1 & ~(1u << 7)) | (dcpr1 & (1u << 13));
+		if (dcpr1Safe != dcpr1) {
+			NGreen::callback->writeReg32(0x46430, dcpr1Safe);
+			SYSLOG("ngreen", "V24: CHICKEN_DCPR_1 0x%x -> 0x%x (bit7 DDI_CLOCK_REG_ACCESS cleared, bit13 preserved)",
+				   dcpr1, dcpr1Safe);
+		} else {
+			SYSLOG("ngreen", "V24: CHICKEN_DCPR_1 already 0x%x (bit7 clear, bit13 preserved) — no write", dcpr1);
+		}
 
 		uint32_t pipeChicken    = NGreen::callback->readReg32(0x70038);
 		uint32_t clkGateDis5    = NGreen::callback->readReg32(0x46540);
@@ -4357,6 +4473,11 @@ uint32_t Gen11::ReadRegister32V15(void *that, unsigned long addr)
 		SYSLOG("ngreen", "VLOCAL15: fuse read 0x%lx 0x%x → 0 (pwcalm)", addr, ret);
 		return 0;
 	}
+	// VLOCAL24: CHICKEN_DCPR_1 is the display-clock-domain gate. The V23 trace showed
+	// the driver reading it as 0x2008 and rewriting it with bit 13 forced on, right
+	// before the TCON/AUX bring-up went silent. Record every value the driver sees.
+	if (addr == 0x46430)
+		v24ClockDomainNote(ret, "ReadRegister32");
 	return ret;
 }
 
