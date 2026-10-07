@@ -11,6 +11,9 @@
 #include <IOKit/IOLib.h>
 #include <kern/thread_call.h>
 
+// VLOCAL12: forward declarations for probe signatures
+namespace AppleIntelPortHAL { class DDI; }
+
 
 // VLOCAL4: global flag — set true when TGL FB kext loads; gates the forcestart path
 bool gVLOCAL4TGLFBLoaded = false;
@@ -546,6 +549,12 @@ bool Gen11::processKext(KernelPatcher &patcher, size_t index, mach_vm_address_t 
 			{"__ZN19AppleIntelPowerWell22hwSetPowerWellStateAuxEbj",hwSetPowerWellStateAux, this->ohwSetPowerWellStateAux},
 			{"__ZN19AppleIntelPowerWell22hwSetPowerWellStateDDIEbj",hwSetPowerWellStateDDI, this->ohwSetPowerWellStateDDI},
 			{"__ZN31AppleIntelRegisterAccessManager19FastWriteRegister32Emj",FastWriteRegister32, this->oFastWriteRegister32},
+			// VLOCAL12 (wsdida GT1): display-pipe init bisect probes (read-only)
+			{"__ZN24AppleIntelBaseController13probeBootPipeEPbPN17AppleIntelPortHAL3DDIE", probeBootPipeV12, this->oprobeBootPipeV12},
+			{"__ZN24AppleIntelBaseController12getFBFromDDIEj", getFBFromDDIV12, this->ogetFBFromDDIV12},
+			{"__ZN24AppleIntelBaseController13getFBFromPipeEj", getFBFromPipeV12, this->ogetFBFromPipeV12},
+			{"__ZN24AppleIntelBaseController13FBMemMgr_InitEv", FBMgrInitV12, this->oFBMgrInitV12},
+			{"__ZN24AppleIntelBaseController15initPMRegistersEv", initPMRegistersV12, this->oinitPMRegistersV12},
 			// V60: ReadRegister32 hooks DISABLED — V59 proved they cause 0-children regression
 			// (display driver loops in forceWake power-well cycling, never completes init)
 			/*{"__ZN31AppleIntelRegisterAccessManager14ReadRegister32Em",raReadRegister32, this->oraReadRegister32},
@@ -4025,6 +4034,44 @@ unsigned long Gen11::telemetryCreateManagerV10(void *that, unsigned int flag)
 	// hits the same GT1-broken IOAccelTask::allocate GPU-VA path. Skip entirely.
 	SYSLOG("ngreen", "VLOCAL10: telemetryCreateManager SKIPPED (flag=%u) — GT1 GPU-VA allocation broken", flag);
 	return 0;
+}
+
+// VLOCAL12 (wsdida GT1): FB-side read-only bisect probes — enter/exit loggers.
+void Gen11::probeBootPipeV12(AppleIntel::AppleIntelBaseController *that, bool *a1, void *a2)
+{
+	SYSLOG("ngreen", "VLOCAL12: probeBootPipe enter");
+	FunctionCast(probeBootPipeV12, callback->oprobeBootPipeV12)(that, a1, a2);
+	SYSLOG("ngreen", "VLOCAL12: probeBootPipe exit");
+}
+
+void *Gen11::getFBFromDDIV12(AppleIntel::AppleIntelBaseController *that, unsigned int ddi)
+{
+	SYSLOG("ngreen", "VLOCAL12: getFBFromDDI enter ddi=%u", ddi);
+	void *ret = FunctionCast(getFBFromDDIV12, callback->ogetFBFromDDIV12)(that, ddi);
+	SYSLOG("ngreen", "VLOCAL12: getFBFromDDI exit ddi=%u ret=%p", ddi, ret);
+	return ret;
+}
+
+void *Gen11::getFBFromPipeV12(AppleIntel::AppleIntelBaseController *that, unsigned int pipe)
+{
+	SYSLOG("ngreen", "VLOCAL12: getFBFromPipe enter pipe=%u", pipe);
+	void *ret = FunctionCast(getFBFromPipeV12, callback->ogetFBFromPipeV12)(that, pipe);
+	SYSLOG("ngreen", "VLOCAL12: getFBFromPipe exit pipe=%u ret=%p", pipe, ret);
+	return ret;
+}
+
+void Gen11::FBMgrInitV12(AppleIntel::AppleIntelBaseController *that)
+{
+	SYSLOG("ngreen", "VLOCAL12: FBMemMgr_Init enter");
+	FunctionCast(FBMgrInitV12, callback->oFBMgrInitV12)(that);
+	SYSLOG("ngreen", "VLOCAL12: FBMemMgr_Init exit");
+}
+
+void Gen11::initPMRegistersV12(AppleIntel::AppleIntelBaseController *that)
+{
+	SYSLOG("ngreen", "VLOCAL12: initPMRegisters enter");
+	FunctionCast(initPMRegistersV12, callback->oinitPMRegistersV12)(that);
+	SYSLOG("ngreen", "VLOCAL12: initPMRegisters exit");
 }
 
 unsigned long Gen11::start(void *that,void  *param_1)
