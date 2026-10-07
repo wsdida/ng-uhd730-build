@@ -2960,6 +2960,20 @@ void *Gen11::CamelliaTcon2_ctor(void *that)
 	ngStep(31, "TCON Camellia ctor");
 	v24TconMark("CamelliaTcon2::ctor enter");
 	void *ret = FunctionCast(CamelliaTcon2_ctor, callback->oCamelliaTcon2_ctor)(that);
+	// V26: the two indirect calls start() makes right after this ctor are
+	// callq *0x120(%rax) (AUX/DDC bring-up) and callq *0x688(%rax). They have no
+	// symbol we can route, so read the vtable slots out of the live object and
+	// resolve them offline against the FB kext base — that names the exact
+	// function the console freezes in.
+	if (that) {
+		auto **vt = *reinterpret_cast<void ***>(that);
+		if (vt) {
+			void *f120 = vt[0x120 / sizeof(void *)];
+			void *f688 = vt[0x688 / sizeof(void *)];
+			SYSLOG("ngreen", "V26 TCON vtable=%p slot120=%p slot688=%p", (void *)vt, f120, f688);
+			IOLog("ngreen: V26 TCON vtable=%p slot120=%p slot688=%p\n", (void *)vt, f120, f688);
+		}
+	}
 	v24TconMark("CamelliaTcon2::ctor exit");
 	return ret;
 }
@@ -2982,10 +2996,16 @@ void Gen11::safeForceWakeV25(bool render, unsigned int domains)
 {
 	if (gV20Armed && gV25FwLogs < 24) {
 		gV25FwLogs++;
-		void *ra = __builtin_return_address(0);
-		SYSLOG("ngreen", "V25 SafeForceWake(render=%u mask=0x%x) caller ra=%p #%d",
-			   render ? 1u : 0u, domains, ra, gV25FwLogs);
-		IOLog("ngreen: V25 SafeForceWake(render=%u mask=0x%x) caller ra=%p #%d\n",
+		void *ra  = __builtin_return_address(0);
+		void *ra1 = __builtin_return_address(1);
+		// V26: also print the address of the very function we replaced. Comparing
+		// it against the FB kext base tells us whether the hook landed on the FB
+		// copy of SafeForceWake, which in turn makes every caller ra above
+		// resolvable (the two caller clusters sit 2.2 MB apart, so they cannot
+		// both live in the FB kext's ~1 MB of text).
+		SYSLOG("ngreen", "V25 SafeForceWake(render=%u mask=0x%x) orig=%p ra=%p ra1=%p #%d",
+			   render ? 1u : 0u, domains, (void *)callback->osafeForceWakeV25, ra, ra1, gV25FwLogs);
+		IOLog("ngreen: V25 SafeForceWake(render=%u mask=0x%x) ra=%p #%d\n",
 			  render ? 1u : 0u, domains, ra, gV25FwLogs);
 	}
 	FunctionCast(safeForceWakeV25, callback->osafeForceWakeV25)(render, domains);
@@ -10420,14 +10440,23 @@ void Gen11::hwSetPowerWellStatePG(AppleIntel::AppleIntelBaseController *that, bo
 
 void Gen11::hwConfigureCustomAUX(AppleIntel::AppleIntelBaseController *that, bool param_1)
 {
-	SYSLOG("ngreen", "hwAUX p1=%d CE4=%d",
-		(int)param_1, getMember<int>(that, 0xCE4));
+	// V26: bracket the AUX/DDC bring-up. This is the first thing the TCON path
+	// runs over I2C/DDC, which never enters the MMIO window — if the console
+	// freezes with "AUX enter" as the last line, the freeze is inside here.
+	ngStep(33, "hwConfigureCustomAUX enter");
+	SYSLOG("ngreen", "V26 AUX enter p1=%d CE4=%d ra=%p",
+		(int)param_1, getMember<int>(that, 0xCE4), __builtin_return_address(0));
+	IOLog("ngreen: V26 AUX enter p1=%d\n", (int)param_1);
 
 	// Pure passthrough — V12 showed that the native "Custom AUX enable" logic works
 	// correctly on ADL-P hardware. The 0x863xx PHY writes added in V12 broke EDID
 	// (56283 µs failure). Native-only: EDID succeeded in 3663 µs on same hardware.
 	if (callback->ohwConfigureCustomAUX)
 		FunctionCast(hwConfigureCustomAUX, callback->ohwConfigureCustomAUX)(that, param_1);
+
+	ngStep(34, "hwConfigureCustomAUX exit");
+	SYSLOG("ngreen", "V26 AUX exit");
+	IOLog("ngreen: V26 AUX exit\n");
 }
 
 
