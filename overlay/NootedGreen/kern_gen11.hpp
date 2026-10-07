@@ -1546,6 +1546,33 @@ private:
 	mach_vm_address_t oenableControllerV22 {};
 	mach_vm_address_t osetupDefaultDBUFV22 {};
 
+	// VLOCAL24 (wsdida GT1): TCON / AUX bring-up window instrumentation.
+	//
+	// V23 forensics pinned the stall to the code right after
+	// AppleIntelBaseController::start() rewrites CHICKEN_DCPR_1 (0x46430): the driver
+	// then allocates a CamelliaTcon2 / BanksiaTcon and calls vtable slot +0x120, which
+	// runs DDC/AUX I2C traffic. That traffic never touches the traced MMIO window, so
+	// the IDLE detector saw a "silent" ring with no further register access at all.
+	// These passthroughs mark entry/exit of exactly that window, so a photo of the
+	// frozen verbose console names the call that never returned.
+	//
+	// ABI notes, verified against the TGL FB kext disassembly:
+	//   operator new(unsigned long) -> void*            (standard operator new)
+	//   CamelliaTcon2::CamelliaTcon2() -> constructor,  no args, returns void*
+	//   BanksiaTcon::BanksiaTcon()   -> same shape
+	// The vtable +0x120 slot (the actual AUX/DDC bring-up) is deliberately NOT hooked:
+	// it is only reachable through the instance vtable, and with no original pointer
+	// captured a route could never call through safely. The new/ctor hooks bracket it
+	// instead — if the freeze happens after "ctor exit" with no further MMIO, the
+	// stall is inside that vtable call.
+	static void *CamelliaTcon2_new(unsigned long size);
+	static void *CamelliaTcon2_ctor(void *that);
+	static void *BanksiaTcon_ctor(void *that);
+	static void v24ClockDomainNote(uint32_t v, const char *ctx);
+	mach_vm_address_t oCamelliaTcon2_new {};
+	mach_vm_address_t oCamelliaTcon2_ctor {};
+	mach_vm_address_t oBanksiaTcon_ctor {};
+
 	// VLOCAL19 (wsdida GT1): SafeForceWake ACK observability — read-only FastRead hook.
 	// The FB kext polls the GT forcewake ACK regs (0xD84 render / 0xD50 media /
 	// 0x130044 default) inside UNBOUNDED spin loops; this logs what they return.
