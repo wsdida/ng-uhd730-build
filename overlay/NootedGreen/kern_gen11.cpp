@@ -930,19 +930,25 @@ bool Gen11::processKext(KernelPatcher &patcher, size_t index, mach_vm_address_t 
 		// eternal spin. Patterns verified unique in the Sonoma 16.0 TGL FB binary:
 		//   render  jne 0x64614  + media  jne 0x646b1  (shared pattern, 2 occurrences)
 		//   default jne 0x64751                            (1 occurrence)
+		//   2D/GT_THREAD_STATUS jne 0x647f7                (1 occurrence) — waits for
+		//     GT_THREAD_STATUS (0x13805C & 7) == 0 before the 2D wake; falls through
+		//     to the normal sLock-unlock exit, so single-poll is safe.
 		if (checkKernelArgument("-ngreenfwcalm")) {
 			static const uint8_t kV19FWRMFind[]  = {0x41,0x89,0xC5,0x41,0x83,0xE5,0x01,0x45,0x38,0xE5,0x75,0x99};
 			static const uint8_t kV19FWRMRepl[]  = {0x41,0x89,0xC5,0x41,0x83,0xE5,0x01,0x45,0x38,0xE5,0x90,0x90};
 			static const uint8_t kV19FWDefFind[] = {0x41,0x89,0xC7,0x41,0x83,0xE7,0x01,0x45,0x38,0xE7,0x75,0x9D};
 			static const uint8_t kV19FWDefRepl[] = {0x41,0x89,0xC7,0x41,0x83,0xE7,0x01,0x45,0x38,0xE7,0x90,0x90};
+			static const uint8_t kV19FW2DTSFind[] = {0x89,0xC3,0x83,0xE3,0x07,0x75,0x97};
+			static const uint8_t kV19FW2DTSRepl[] = {0x89,0xC3,0x83,0xE3,0x07,0x90,0x90};
 			LookupPatchPlus const v19Patches[] = {
-				{activeKext, kV19FWRMFind,  kV19FWRMRepl,  arrsize(kV19FWRMFind),  2},
-				{activeKext, kV19FWDefFind, kV19FWDefRepl, arrsize(kV19FWDefFind), 1},
+				{activeKext, kV19FWRMFind,   kV19FWRMRepl,   arrsize(kV19FWRMFind),   2},
+				{activeKext, kV19FWDefFind,  kV19FWDefRepl,  arrsize(kV19FWDefFind),  1},
+				{activeKext, kV19FW2DTSFind, kV19FW2DTSRepl, arrsize(kV19FW2DTSFind), 1},
 			};
 			if (LookupPatchPlus::applyAll(patcher, v19Patches, address, size))
-				SYSLOG("ngreen", "VLOCAL19: SafeForceWake spins bounded (render+media x2, default x1)");
+				SYSLOG("ngreen", "VLOCAL19b: SafeForceWake spins bounded (render+media x2, default x1, 2D/GT_THREAD_STATUS x1)");
 			else
-				SYSLOG("ngreen", "VLOCAL19: SafeForceWake patch FAILED to match — spin loops still unbounded!");
+				SYSLOG("ngreen", "VLOCAL19b: SafeForceWake patch FAILED to match — spin loops still unbounded!");
 		}
 
 		return true;
@@ -4224,18 +4230,22 @@ void Gen11::installOpRegionV18()
 
 // VLOCAL19 (wsdida GT1): SafeForceWake ACK observability — read-only FastRead hook.
 // The FB kext polls the GT forcewake ACK registers (0xD84 render / 0xD50 media /
-// 0x130044 default) via FastReadRegister32 inside UNBOUNDED spin loops. Under
+// 0x130044 default) and GT_THREAD_STATUS (0x13805C, 2D) via FastReadRegister32
+// inside UNBOUNDED spin loops. Under
 // -ngreenfwcalm the loops are bounded by binary patch; this budgeted hook records
 // what the ACK registers actually return so we can see whether the GT ever
 // acknowledges a forcewake request (and which domain fails).
 uint32_t Gen11::FastReadRegister32V19(void *that, unsigned long addr)
 {
 	uint32_t ret = FunctionCast(FastReadRegister32V19, callback->oFastReadRegister32V19)(that, addr);
-	if (addr == 0xD84 || addr == 0xD50 || addr == 0x130044) {
+	if (addr == 0xD84 || addr == 0xD50 || addr == 0x130044 || addr == 0x13805C) {
 		static int v19Count = 0;
 		if (v19Count < 24) {
 			v19Count++;
-			SYSLOG("ngreen", "V19ACK[%d]: reg=0x%lx val=0x%x bit0=%u", v19Count, addr, ret, ret & 1);
+			if (addr == 0x13805C)
+				SYSLOG("ngreen", "V19ACK[%d]: reg=0x%lx val=0x%x threads=0x%x (0=idle)", v19Count, addr, ret, ret & 7);
+			else
+				SYSLOG("ngreen", "V19ACK[%d]: reg=0x%lx val=0x%x bit0=%u", v19Count, addr, ret, ret & 1);
 		}
 	}
 	return ret;
