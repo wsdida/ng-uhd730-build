@@ -10,6 +10,9 @@
 #include <IOKit/IOCatalogue.h>
 #include <IOKit/IOLib.h>
 #include <kern/thread_call.h>
+#include <IOKit/pci/IOPCIDevice.h>
+#include <kern/task.h>
+#include "kern_vbt.hpp"
 
 // VLOCAL12: forward declarations for probe signatures
 namespace AppleIntelPortHAL { class DDI; }
@@ -3705,6 +3708,7 @@ bool Gen11::AppleIntelBaseControllerstart(AppleIntel::AppleIntelBaseController *
 	SYSLOG("ngreen", "AppleIntelBaseControllerstart: display workarounds applied");
 
 	SYSLOG("ngreen", "FBController::start() entering...");
+	installOpRegionV18();
 	auto ret=FunctionCast(AppleIntelBaseControllerstart, callback->oAppleIntelBaseControllerstart)(that,param_1 );
 	SYSLOG("ngreen", "FBController::start() returned %d", ret);
 	// VLOCAL1 (wsdida desktop GT1 experiment): force start() success behind a boot-arg toggle.
@@ -4104,6 +4108,87 @@ unsigned int Gen11::setupBootDisplayV17(AppleIntel::AppleIntelBaseController *th
 	}
 	SYSLOG("ngreen", "VLOCAL17: setupBootDisplay enter (native)");
 	return FunctionCast(setupBootDisplayV17, callback->osetupBootDisplayV17)(that);
+}
+
+// ── VLOCAL18 (wsdida GT1): in-kernel Intel OpRegion + VBT ─────────────────────
+// Ports are never created because the driver has no VBT (desktop firmware with a
+// primary dGPU never builds the iGPU OpRegion). We build the OpRegion ourselves:
+//   0x000 header ("IntelGraphicsMem", size, ver)
+//   0x100 ACPI mailbox / 0x200 SWSCI / 0x300 ASLE (RVDA=0 → VBT at 0x400)
+//   0x400 VBT (8704 bytes extracted from the board BIOS F25a)
+// then write the physical address to ASLS (IGPU PCI config 0xFC). Apple's driver
+// parses the VBT → creates AppleIntelPort objects → getPortByDDI works → the real
+// boot pipe (BIOS primary=IGFX) gets adopted → display output.
+static IOBufferMemoryDescriptor *gOpRegionBuf = nullptr;
+
+void Gen11::installOpRegionV18()
+{
+	if (!checkKernelArgument("-ngreenvbt")) return;
+	static bool done = false;
+	if (done) return;
+	done = true;
+
+	auto *matching = IOService::serviceMatching("IOPCIDevice");
+	if (!matching) { SYSLOG("ngreen", "VLOCAL18: serviceMatching failed"); return; }
+	OSIterator *it = IOService::getMatchingServices(matching);
+	matching->release();
+	if (!it) { SYSLOG("ngreen", "VLOCAL18: no PCI iterator"); return; }
+
+	IOPCIDevice *igpu = nullptr;
+	OSObject *obj = nullptr;
+	while ((obj = it->getNextObject()) != nullptr) {
+		auto *dev = OSDynamicCast(IOPCIDevice, obj);
+		if (!dev) continue;
+		uint32_t vd = dev->configRead32(0x00);
+		uint32_t cr = dev->configRead32(0x08);
+		if ((vd & 0xFFFF) == 0x8086 && ((cr >> 24) & 0xFF) == 0x03) {
+			igpu = dev;
+			igpu->retain();
+			break;
+		}
+	}
+	it->release();
+	if (!igpu) { SYSLOG("ngreen", "VLOCAL18: Intel display PCI device not found"); return; }
+
+	uint32_t asls = igpu->configRead32(0xFC);
+	if (asls != 0) {
+		SYSLOG("ngreen", "VLOCAL18: ASLS already 0x%08x — OpRegion exists, leaving it", asls);
+		igpu->release();
+		return;
+	}
+
+	// contiguous, below 4G (ASLS is a 32-bit register)
+	IOBufferMemoryDescriptor *buf = nullptr;
+	uint64_t phys = 0;
+	for (int attempt = 0; attempt < 48 && !buf; attempt++) {
+		auto *b = IOBufferMemoryDescriptor::inTaskWithOptions(kernel_task,
+			kIODirectionInOut | kIOMemoryPhysicallyContiguous | kIOMemoryHostPhysicallyContiguous,
+			0x2600);
+		if (!b) break;
+		uint64_t len = 0;
+		uint64_t p = b->getPhysicalSegment64(0, &len);
+		if (p != 0 && len >= 0x2600 && (p + 0x2600) <= 0x100000000ull) {
+			buf = b;
+			phys = p;
+		} else {
+			b->release();
+		}
+	}
+	if (!buf) { SYSLOG("ngreen", "VLOCAL18: contiguous <4G allocation failed"); igpu->release(); return; }
+
+	uint8_t *va = reinterpret_cast<uint8_t *>(buf->getBytesNoCopy());
+	bzero(va, 0x2600);
+	memcpy(va, "IntelGraphicsMem", 16);
+	*reinterpret_cast<uint32_t *>(va + 0x10) = 0x2600;      // size
+	*reinterpret_cast<uint32_t *>(va + 0x14) = 0x02000000;  // version 2.0
+	memcpy(va + 0x400, gVBT, sizeof(gVBT));                 // VBT at 0x400 (RVDA=0)
+	*reinterpret_cast<uint32_t *>(va + 0x32c) = sizeof(gVBT); // ASLE.RVDS
+
+	igpu->configWrite32(0xFC, static_cast<uint32_t>(phys));
+	gOpRegionBuf = buf;  // intentional leak — must stay alive for the driver's lifetime
+	SYSLOG("ngreen", "VLOCAL18: OpRegion @ phys 0x%llx (0x2600 bytes, VBT %u @+0x400) — ASLS written",
+	       phys, (unsigned)sizeof(gVBT));
+	igpu->release();
 }
 
 void *Gen11::getFBFromDDIV12(AppleIntel::AppleIntelBaseController *that, unsigned int ddi)
