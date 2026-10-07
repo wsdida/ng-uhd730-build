@@ -10,6 +10,7 @@
 #include <IOKit/IOCatalogue.h>
 #include <IOKit/IOLib.h>
 #include <kern/thread_call.h>
+#include <kern/clock.h>
 #include <IOKit/pci/IOPCIDevice.h>
 #include <kern/task.h>
 #include "kern_vbt.hpp"
@@ -20,6 +21,50 @@ namespace AppleIntelPortHAL { class DDI; }
 
 // VLOCAL4: global flag — set true when TGL FB kext loads; gates the forcestart path
 bool gVLOCAL4TGLFBLoaded = false;
+
+// ============================================================================
+// VLOCAL20 (wsdida GT1): display-init stall detector + MMIO trace ring.
+//
+// Problem: with the monitor on the motherboard port (BIOS primary=IGFX) the boot
+// freezes late in verbose output (around the WindowServer/CG graphics takeover).
+// There is no panic file and no Lilu dump: the freeze happens before the 30 s
+// liludump and before the 45 s LaunchDaemon, so every reboot loses the evidence.
+//
+// This recorder keeps a ring buffer of the last display-range register accesses
+// (writes + reads) performed by the FB driver, plus a 1 s watchdog timer. When a
+// real boot pipe exists (iGPU console) and the driver goes silent for >6 s, the
+// watchdog dumps the last accesses to the kernel log AND to the verbose console
+// (IOLog) — so the exact spot where display init stopped becomes visible on
+// screen, without needing a panic or a file dump.
+// ============================================================================
+struct NGTr20Entry { uint32_t addr; uint32_t val; uint8_t wr; uint8_t pad[3]; };
+static NGTr20Entry gTr20[64];
+static volatile int      gTr20Idx    = 0;
+static volatile uint64_t gTr20LastNs = 0;
+static volatile uint64_t gV20ArmNs   = 0;
+static volatile int      gV20Armed   = 0;
+static volatile int      gV20Dumped  = 0;
+
+static inline uint64_t v20NowNs() {
+    uint64_t t = 0;
+    clock_get_uptime(&t);
+    return t;
+}
+
+static inline void v20Trace(uint32_t addr, uint32_t val, uint8_t wr) {
+    if (!gV20Armed) return;
+    // display engine blocks only: transcoder/pipe/DDI/AUX (0x40000-0x7FFFF)
+    // plus the Type-C subsystem window (0x160000-0x16FFFF)
+    if (!((addr >= 0x40000 && addr < 0x80000) || (addr >= 0x160000 && addr < 0x170000))) return;
+    int i = gTr20Idx;
+    gTr20[i & 63].addr = addr;
+    gTr20[i & 63].val  = val;
+    gTr20[i & 63].wr   = wr;
+    gTr20[i & 63].pad[0] = gTr20[i & 63].pad[1] = gTr20[i & 63].pad[2] = 0;
+    gTr20Idx = i + 1;
+    gTr20LastNs = v20NowNs();
+}
+
 
 // ==== 6 kextInfos: ICL fallback + dual TGL identities (com.xxxxx and com.apple) from /Library/Extensions ====
 //trivial
@@ -2665,6 +2710,7 @@ void Gen11::hwSetPowerWellStateDDI(AppleIntel::AppleIntelBaseController *that, b
 
 void Gen11::FastWriteRegister32(AppleIntel::AppleIntelBaseController *that, unsigned long param_1, uint32_t param_2)
 {
+	v20Trace((uint32_t)param_1, param_2, 1);   // VLOCAL20: display-range MMIO trace
 	// V99D: Diagnose — log all FastWrite calls near display engine range on first boot
 	// to understand what addresses/values flow through this path.
 	{
@@ -4101,6 +4147,15 @@ unsigned int Gen11::probeBootPipeV12(AppleIntel::AppleIntelBaseController *that,
 			*a1 = true;
 		ret = 0;
 	}
+	// VLOCAL20: a real boot pipe means the iGPU is the console display — this is the
+	// only configuration in which the display takeover path runs (and where the
+	// unbounded waits can be reached). Arm the stall detector + MMIO trace here.
+	if (ret != 0xffff && !gV20Armed) {
+		gV20Armed = 1;
+		gV20ArmNs = v20NowNs();
+		gTr20LastNs = gV20ArmNs;
+		SYSLOG("ngreen", "VLOCAL20: real boot pipe (ret=%u) — display stall detector ARMED", ret);
+	}
 	return ret;
 }
 
@@ -4118,6 +4173,7 @@ unsigned int Gen11::probeBootPipeV12(AppleIntel::AppleIntelBaseController *that,
 uint32_t Gen11::ReadRegister32V15(void *that, unsigned long addr)
 {
 	uint32_t ret = FunctionCast(ReadRegister32V15, callback->oReadRegister32V15)(that, addr);
+	v20Trace((uint32_t)addr, ret, 0);   // VLOCAL20: display-range MMIO trace
 	// VLOCAL16: targeted read trace — only pipe/panel regs (0x60000-0x64FFF) and
 	// fuses (0x454xx), so the log budget isn't wasted on unrelated early reads.
 	static unsigned long v16LogCount = 0;
@@ -4238,6 +4294,7 @@ void Gen11::installOpRegionV18()
 uint32_t Gen11::FastReadRegister32V19(void *that, unsigned long addr)
 {
 	uint32_t ret = FunctionCast(FastReadRegister32V19, callback->oFastReadRegister32V19)(that, addr);
+	v20Trace((uint32_t)addr, ret, 0);   // VLOCAL20: display-range MMIO trace
 	if (addr == 0xD84 || addr == 0xD50 || addr == 0x130044 || addr == 0x13805C) {
 		static int v19Count = 0;
 		if (v19Count < 24) {
@@ -4991,6 +5048,23 @@ unsigned long Gen11::start(void *that,void  *param_1)
 					SYSLOG("ngreen", "V74: EMR enforcer armed — 50ms interval, PERMANENT");
 				} else {
 					emrSvc->release(); // alloc failed — drop our retain
+				}
+			}
+
+			// VLOCAL20 (wsdida GT1): arm the display-init stall detector (1 s interval).
+			// Inactive unless probeBootPipe found a real boot pipe (iGPU console boot).
+			{
+				auto *stallSvc = static_cast<IOService *>(that);
+				stallSvc->retain();
+				auto stallTimer = thread_call_allocate(v20StallWatch,
+								 static_cast<thread_call_param_t>(stallSvc));
+				if (stallTimer) {
+					uint64_t deadline;
+					clock_interval_to_deadline(1000, kMillisecondScale, &deadline);
+					thread_call_enter_delayed(stallTimer, deadline);
+					SYSLOG("ngreen", "VLOCAL20: display stall detector armed (1s interval, iGPU-boot gated)");
+				} else {
+					stallSvc->release();
 				}
 			}
 
@@ -8540,6 +8614,60 @@ void Gen11::v60GpuHealthMonitor(thread_call_param_t param0, thread_call_param_t 
 		SYSLOG("ngreen", "V60M: complete — %d iterations, final HEAD=0x%x EXEC=0x%x ch=%d",
 			   v60Count, rcsHead, execStatus, childCount);
 		monSvc->release(); // last iteration — release the retain
+	}
+}
+
+// VLOCAL20 (wsdida GT1): display-init stall watchdog — fires every 1 s.
+//
+// WHEN ACTIVE: only after probeBootPipe reported a REAL boot pipe (i.e. the iGPU is
+// driving the console because BIOS primary=IGFX and the monitor is on the
+// motherboard port). Fallback (dGPU console) boots never arm it, so nothing is
+// printed and nothing changes for the working configuration.
+//
+// WHAT IT DOES: if the FB driver has logged at least 16 display-range MMIO accesses
+// and then goes silent for more than 6 s, the driver is almost certainly stuck in
+// one of the display-path poll loops (hwSetMode / setupDefaultDBUF / closeDSB /
+// GMBus EDID / power well ...). The watchdog prints the last 40 accesses (address,
+// direction, value) to BOTH the kernel log (SYSLOG) and the verbose console
+// (IOLog), so the freeze point is readable on screen — no panic and no file dump
+// needed. Dumps exactly once.
+void Gen11::v20StallWatch(thread_call_param_t param0, thread_call_param_t param1) {
+	uint64_t now = v20NowNs();
+	if (gV20Armed && !gV20Dumped) {
+		uint64_t last = gTr20LastNs ? gTr20LastNs : gV20ArmNs;
+		uint64_t idleMs = (now > last) ? (now - last) / 1000000ULL : 0;
+		if (idleMs > 6000 && gTr20Idx > 16) {
+			gV20Dumped = 1;
+			int n = gTr20Idx;
+			int cnt = (n < 40) ? n : 40;
+			SYSLOG("ngreen", "V20STALL: display init silent for %llu ms after %d accesses — dumping last %d",
+				   (unsigned long long)idleMs, n, cnt);
+			IOLog("ngreen: V20STALL: display init silent %llums, last %d accesses:\n",
+				  (unsigned)(idleMs > 99999 ? 99999 : idleMs), cnt);
+			for (int k = 0; k < cnt; k++) {
+				NGTr20Entry *e = &gTr20[(n - cnt + k) & 63];
+				SYSLOG("ngreen", "V20TRACE[%d/%d]: %s 0x%05x = 0x%08x",
+					   k + 1, cnt, e->wr ? "WR" : "RD", e->addr, e->val);
+				IOLog("ngreen: V20TRACE[%d/%d]: %s 0x%05x = 0x%08x\n",
+					  k + 1, cnt, e->wr ? "WR" : "RD", e->addr, e->val);
+			}
+			SYSLOG("ngreen", "V20STALL: trace end (idx=%d)", n);
+			IOLog("ngreen: V20STALL: trace end (idx=%d)\n", n);
+		}
+	}
+	// Re-arm every 1000 ms; retain travels with the timer (same pattern as V74).
+	auto *svc = static_cast<IOService *>(param0);
+	if (!NGreen::callback->mmioValid()) {
+		svc->release();
+		return;
+	}
+	auto nextTimer = thread_call_allocate(v20StallWatch, param0);
+	if (nextTimer) {
+		uint64_t deadline;
+		clock_interval_to_deadline(1000, kMillisecondScale, &deadline);
+		thread_call_enter_delayed(nextTimer, deadline);
+	} else {
+		svc->release();
 	}
 }
 
