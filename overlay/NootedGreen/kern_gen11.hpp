@@ -1404,7 +1404,7 @@ private:
 	// VLOCAL15 (wsdida GT1 + BIOS IGFX): intercept fuse reads so native PowerWell::init
 	// sees no UEFI-enabled DDIs (its DDI loop crashes on getPortByDDI==NULL when the
 	// firmware enables iGPU display — ports don't exist yet at that stage)
-	static uint32_t ReadRegister32V15(void *that, void *mmio, unsigned long addr);
+	static uint32_t ReadRegister32V15(void *that, unsigned long addr);
 	mach_vm_address_t oReadRegister32V15 {};
 	static unsigned long telemetryCreateManagerV10(void *that, unsigned int flag);
 	mach_vm_address_t otelemetryCreateManagerV10 {};
