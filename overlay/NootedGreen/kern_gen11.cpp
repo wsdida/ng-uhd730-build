@@ -4075,9 +4075,11 @@ unsigned int Gen11::probeBootPipeV12(AppleIntel::AppleIntelBaseController *that,
 uint32_t Gen11::ReadRegister32V15(void *that, unsigned long addr)
 {
 	uint32_t ret = FunctionCast(ReadRegister32V15, callback->oReadRegister32V15)(that, addr);
-	// VLOCAL16: full read trace (capped) to see exactly what probeBootPipe reads
+	// VLOCAL16: targeted read trace — only pipe/panel regs (0x60000-0x64FFF) and
+	// fuses (0x454xx), so the log budget isn't wasted on unrelated early reads.
 	static unsigned long v16LogCount = 0;
-	if (checkKernelArgument("-ngreenrdlog") && v16LogCount < 60) {
+	bool v16Interesting = (addr >= 0x60000 && addr <= 0x64FFF) || (addr >= 0x45400 && addr <= 0x454FF);
+	if (checkKernelArgument("-ngreenrdlog") && v16Interesting && v16LogCount < 100) {
 		v16LogCount++;
 		SYSLOG("ngreen", "VLOCAL16: rd 0x%lx = 0x%08x (%llu)", addr, ret, v16LogCount);
 	}
