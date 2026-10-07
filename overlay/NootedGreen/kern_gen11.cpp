@@ -91,6 +91,18 @@ static volatile int       gV22RefShown = 0;
 static volatile uint64_t gV21StallNs  = 0;
 static volatile int      gV21LastTick = -1;
 
+// VLOCAL23: snapshot taken once, at the moment the stall detector trips.
+// FWACK* = FORCEWAKE ack registers (0xD84 render / 0xD88-0xD94 media family),
+// GTTS = GT_THREAD_STATUS (0x13805C). If the forcewake handshake completed,
+// FWACK0 bit0 (and friends) will read 1; all-zero acks with a trigger write as
+// the last MMIO op means the handshake never finished. Read once at trip time
+// (uncore regs, no forcewake needed, safe) — never at panic time.
+static volatile uint32_t gV23FwAck0 = 0;
+static volatile uint32_t gV23FwAck1 = 0;
+static volatile uint32_t gV23FwAck2 = 0;
+static volatile uint32_t gV23FwAck3 = 0;
+static volatile uint32_t gV23Gtts   = 0;
+
 static inline uint64_t v20NowNs() {
     uint64_t t = 0;
     clock_get_uptime(&t);
@@ -8819,17 +8831,27 @@ void Gen11::v20StallWatch(thread_call_param_t param0, thread_call_param_t param1
 		}
 
 		if (gV20Dumped) {
+			// V23: snapshot forcewake ack state once, at trip time.
+			if (NGreen::callback->mmioValid()) {
+				gV23FwAck0 = NGreen::callback->readReg32(0xD84);
+				gV23FwAck1 = NGreen::callback->readReg32(0xD88);
+				gV23FwAck2 = NGreen::callback->readReg32(0xD90);
+				gV23FwAck3 = NGreen::callback->readReg32(0xD94);
+				gV23Gtts   = NGreen::callback->readReg32(0x13805C);
+			}
 			int n = gTr20Idx;
 			int cnt = (n < 40) ? n : 40;
-			SYSLOG("ngreen", "V22STALL[%s]: idx=%d idle=%llums pair=%llums cnt=%u ra=0x%lx reg=0x%05x step=%d",
+			SYSLOG("ngreen", "V22STALL[%s]: idx=%d idle=%llums pair=%llums cnt=%u ra=0x%lx reg=0x%05x step=%d FWACK 84=%08x 88=%08x 90=%08x 94=%08x GTTS=%08x",
 				   gV22Reason == 1 ? "SPIN" : "IDLE", n, (unsigned long long)idleMs,
 				   (unsigned long long)pairMs, (unsigned)gV22PairCnt,
-				   (unsigned long)(uint32_t)gV22PairRa, (unsigned)gV22PairAddr, (int)gV22Step);
-			IOLog("ngreen: V22STALL[%s] idx=%d idle=%llums pair=%llums cnt=%u ra=0x%lx reg=0x%05x step=%d\n",
+				   (unsigned long)(uint32_t)gV22PairRa, (unsigned)gV22PairAddr, (int)gV22Step,
+				   gV23FwAck0, gV23FwAck1, gV23FwAck2, gV23FwAck3, gV23Gtts);
+			IOLog("ngreen: V22STALL[%s] idx=%d idle=%llums pair=%llums cnt=%u ra=0x%lx reg=0x%05x step=%d FWACK 84=%08x 88=%08x 90=%08x 94=%08x GTTS=%08x\n",
 				  gV22Reason == 1 ? "SPIN" : "IDLE", n,
 				  (unsigned)(idleMs > 999999 ? 999999 : idleMs),
 				  (unsigned)(pairMs > 999999 ? 999999 : pairMs), (unsigned)gV22PairCnt,
-				  (unsigned long)(uint32_t)gV22PairRa, (unsigned)gV22PairAddr, (int)gV22Step);
+				  (unsigned long)(uint32_t)gV22PairRa, (unsigned)gV22PairAddr, (int)gV22Step,
+				  gV23FwAck0, gV23FwAck1, gV23FwAck2, gV23FwAck3, gV23Gtts);
 			for (int k = 0; k < cnt; k++) {
 				NGTr20Entry *e = &gTr20[(n - cnt + k) & 63];
 				SYSLOG("ngreen", "V22TRACE[%d/%d]: %s 0x%05x = 0x%08x ra=0x%llx",
@@ -8871,23 +8893,36 @@ void Gen11::v20StallWatch(thread_call_param_t param0, thread_call_param_t param1
 
 			if (sec >= (uint64_t)delay) {
 				int n = gTr20Idx;
-				int cnt = (n < 6) ? n : 6;
-				NGTr20Entry *e0 = &gTr20[(n - cnt) & 63];
-				SYSLOG("ngreen", "V21: AUTO REBOOT now — display init stalled %llu s, mmio idx=%d",
+				// V23: snapshot the NEWEST four entries (the old code printed
+				// entries n-6..n-3 and silently skipped the two newest) and
+				// enrich the panic banner with the detector verdict + caller.
+				NGTr20Entry e4[4] = {};
+				int cnt = (n < 4) ? n : 4;
+				for (int k = 0; k < cnt; k++)
+					e4[k] = gTr20[(n - cnt + k) & 63];
+				SYSLOG("ngreen", "V23: AUTO REBOOT now — display init stalled %llu s, mmio idx=%d",
 					   (unsigned long long)sec, n);
-				IOLog("ngreen: V21: AUTO REBOOT NOW (display init stalled %us)\n",
+				IOLog("ngreen: V23: AUTO REBOOT NOW (display init stalled %us)\n",
 					  (unsigned)(sec > 9999 ? 9999 : sec));
-				// panic() -> XNU reboots by itself. The panic string carries the
-				// last four display-range accesses so the hang point survives.
+				// panic() -> XNU reboots by itself. The banner carries: detector
+				// reason (SPIN/IDLE), last breadcrumb step, the (caller, register)
+				// pair of the stall, the forcewake-ack snapshot taken at trip
+				// time, and the newest four MMIO accesses — everything needed to
+				// locate the hang from a photo of the panic screen alone.
 				if (cnt >= 4) {
-					panic("NGRN V21 auto-reboot: display-init stalled. last MMIO:"
-						  " %s 0x%05x=0x%08x | %s 0x%05x=0x%08x | %s 0x%05x=0x%08x | %s 0x%05x=0x%08x",
-						  e0[0].wr ? "WR" : "RD", e0[0].addr, e0[0].val,
-						  e0[1].wr ? "WR" : "RD", e0[1].addr, e0[1].val,
-						  e0[2].wr ? "WR" : "RD", e0[2].addr, e0[2].val,
-						  e0[3].wr ? "WR" : "RD", e0[3].addr, e0[3].val);
+					panic("NGRN V23 auto-reboot: stall[%s] step=%d ra=0x%08x reg=0x%05x cnt=%u | "
+						  "FWACK 84=%08x 88=%08x 90=%08x 94=%08x GTTS=%08x | "
+						  "last MMIO: %s 0x%05x=0x%08x | %s 0x%05x=0x%08x | %s 0x%05x=0x%08x | %s 0x%05x=0x%08x",
+						  gV22Reason == 1 ? "SPIN" : "IDLE", (int)gV22Step,
+						  (unsigned)(uint32_t)gV22PairRa, (unsigned)gV22PairAddr,
+						  (unsigned)gV22PairCnt,
+						  gV23FwAck0, gV23FwAck1, gV23FwAck2, gV23FwAck3, gV23Gtts,
+						  e4[0].wr ? "WR" : "RD", e4[0].addr, e4[0].val,
+						  e4[1].wr ? "WR" : "RD", e4[1].addr, e4[1].val,
+						  e4[2].wr ? "WR" : "RD", e4[2].addr, e4[2].val,
+						  e4[3].wr ? "WR" : "RD", e4[3].addr, e4[3].val);
 				} else {
-					panic("NGRN V21 auto-reboot: display-init stalled (mmio idx=%d, too few entries)", n);
+					panic("NGRN V23 auto-reboot: display-init stalled (mmio idx=%d, too few entries) step=%d", n, (int)gV22Step);
 				}
 			}
 
@@ -8895,9 +8930,9 @@ void Gen11::v20StallWatch(thread_call_param_t param0, thread_call_param_t param1
 			int tick = (int)(sec / 10);
 			if (tick != gV21LastTick) {
 				gV21LastTick = tick;
-				IOLog("ngreen: V21: display init stalled — AUTO REBOOT in %us (move the display cable to the dGPU now)\n",
+				IOLog("ngreen: V23: display init stalled — AUTO REBOOT in %us (move the display cable to the dGPU now)\n",
 					  (unsigned)(delay - (int)sec));
-				SYSLOG("ngreen", "V21: stall — auto reboot in %llu s", (unsigned long long)(delay - (int)sec));
+				SYSLOG("ngreen", "V23: stall — auto reboot in %llu s", (unsigned long long)(delay - (int)sec));
 			}
 		}
 	}
