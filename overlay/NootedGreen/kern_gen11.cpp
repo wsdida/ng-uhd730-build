@@ -555,6 +555,8 @@ bool Gen11::processKext(KernelPatcher &patcher, size_t index, mach_vm_address_t 
 			{"__ZN24AppleIntelBaseController13getFBFromPipeEj", getFBFromPipeV12, this->ogetFBFromPipeV12},
 			{"__ZN24AppleIntelBaseController13FBMemMgr_InitEv", FBMgrInitV12, this->oFBMgrInitV12},
 			{"__ZN24AppleIntelBaseController15initPMRegistersEv", initPMRegistersV12, this->oinitPMRegistersV12},
+			// VLOCAL15: fuse-read sanitizer (BIOS IGFX + PowerWell::init DDI-loop crash)
+			{"__ZN31AppleIntelRegisterAccessManager14ReadRegister32EPVvm", ReadRegister32V15, this->oReadRegister32V15},
 			// V60: ReadRegister32 hooks DISABLED — V59 proved they cause 0-children regression
 			// (display driver loops in forceWake power-well cycling, never completes init)
 			/*{"__ZN31AppleIntelRegisterAccessManager14ReadRegister32Em",raReadRegister32, this->oraReadRegister32},
@@ -4055,6 +4057,23 @@ unsigned int Gen11::probeBootPipeV12(AppleIntel::AppleIntelBaseController *that,
 		if (a1)
 			*a1 = true;
 		ret = 0;
+	}
+	return ret;
+}
+
+// VLOCAL15 (wsdida GT1 + BIOS IGFX): native PowerWell::init parses the DDI fuse
+// (0x45454) / AUX fuse (0x45444) and loops over UEFI-enabled DDIs calling
+// AppleIntelPort::getPortByDDI — which returns NULL (ports don't exist yet) and
+// Apple derefs it without a check (panic at PowerWell::init+0x14af). With
+// -ngreenpwcalm we report the fuses as zero so the loop skips entirely; the REAL
+// boot pipe is still discovered later via probeBootPipe's own registers
+// (0x60400/0x61400/0x62400) which are NOT masked.
+uint32_t Gen11::ReadRegister32V15(void *that, void *mmio, unsigned long addr)
+{
+	uint32_t ret = FunctionCast(ReadRegister32V15, callback->oReadRegister32V15)(that, mmio, addr);
+	if (checkKernelArgument("-ngreenpwcalm") && (addr == 0x45454 || addr == 0x45444)) {
+		SYSLOG("ngreen", "VLOCAL15: fuse read 0x%lx 0x%x → 0 (pwcalm)", addr, ret);
+		return 0;
 	}
 	return ret;
 }
