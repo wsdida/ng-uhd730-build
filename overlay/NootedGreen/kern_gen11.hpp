@@ -1373,6 +1373,7 @@ private:
 	static void v54IrqWatchdog(thread_call_param_t, thread_call_param_t);  // V54: IRQ watchdog
 	static void v60GpuHealthMonitor(thread_call_param_t, thread_call_param_t);  // V60: active ERROR_GEN6 suppression + monitor
 	static void v71EmrEnforcer(thread_call_param_t, thread_call_param_t);  // V71: high-freq EMR mask + ERROR clear (50ms)
+	static void v20StallWatch(thread_call_param_t, thread_call_param_t);   // VLOCAL20: display-init stall detector (1s)
 	static IOMemoryMap *v85PersistMap;   // V85: persistent FB page 0 mapping for 50ms fill
 	static uint32_t v85SurfAddr;         // V85: cached PLANE_SURF address
 	static IOBufferMemoryDescriptor *v116DummyBuf;  // V116: safe dummy page for GGTT[0] remap
