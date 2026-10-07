@@ -4037,11 +4037,14 @@ unsigned long Gen11::telemetryCreateManagerV10(void *that, unsigned int flag)
 }
 
 // VLOCAL12 (wsdida GT1): FB-side read-only bisect probes — enter/exit loggers.
-void Gen11::probeBootPipeV12(AppleIntel::AppleIntelBaseController *that, bool *a1, void *a2)
+// VLOCAL13: probeBootPipe returns a 32-bit value (disasm: movl %r15d,%eax before ret;
+// 0xffff on error paths) — the void declaration caused the VLOCAL12 boot freeze.
+unsigned int Gen11::probeBootPipeV12(AppleIntel::AppleIntelBaseController *that, bool *a1, void *a2)
 {
-	SYSLOG("ngreen", "VLOCAL12: probeBootPipe enter");
-	FunctionCast(probeBootPipeV12, callback->oprobeBootPipeV12)(that, a1, a2);
-	SYSLOG("ngreen", "VLOCAL12: probeBootPipe exit");
+	SYSLOG("ngreen", "VLOCAL13: probeBootPipe enter");
+	unsigned int ret = FunctionCast(probeBootPipeV12, callback->oprobeBootPipeV12)(that, a1, a2);
+	SYSLOG("ngreen", "VLOCAL13: probeBootPipe exit ret=0x%x", ret);
+	return ret;
 }
 
 void *Gen11::getFBFromDDIV12(AppleIntel::AppleIntelBaseController *that, unsigned int ddi)
