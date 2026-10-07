@@ -1410,6 +1410,8 @@ private:
 	// because ports don't exist without VBT/OpRegion). Caller checks eax==0 to continue.
 	static unsigned int setupBootDisplayV17(AppleIntel::AppleIntelBaseController *that);
 	mach_vm_address_t osetupBootDisplayV17 {};
+	// VLOCAL18 (wsdida GT1): build Intel OpRegion + VBT in kernel and register via ASLS
+	static void installOpRegionV18();
 	static unsigned long telemetryCreateManagerV10(void *that, unsigned int flag);
 	mach_vm_address_t otelemetryCreateManagerV10 {};
 
