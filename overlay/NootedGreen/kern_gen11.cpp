@@ -4050,6 +4050,10 @@ unsigned int Gen11::probeBootPipeV12(AppleIntel::AppleIntelBaseController *that,
 	// FB driver proceeds into display-pipe creation instead of failing start().
 	if (ret == 0xffff && checkKernelArgument("-ngreenfakebootpipe")) {
 		SYSLOG("ngreen", "VLOCAL14: no boot pipe (0xffff) — faking pipe 0 per -ngreenfakebootpipe");
+		// Match the callee's own success-path behavior: it writes *a1 = true
+		// (disasm 0x61cd3: movb $0x1,(%r13), null-checked) when a pipe is found.
+		if (a1)
+			*a1 = true;
 		ret = 0;
 	}
 	return ret;
