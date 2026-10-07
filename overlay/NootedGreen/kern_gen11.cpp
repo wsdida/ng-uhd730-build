@@ -440,6 +440,9 @@ bool Gen11::processKext(KernelPatcher &patcher, size_t index, mach_vm_address_t 
 		auto *activeKext = (kextG11FBTA.loadIndex == index) ? &kextG11FBTA : &kextG11FBT;
 		NGreen::callback->setRMMIOIfNecessary();
 		SYSLOG("ngreen", "init AppleIntelTGLGraphicsFramebuffer");
+		// VLOCAL18b: install the OpRegion at kext-load time — the earliest point,
+		// before ANY Apple code could read ASLS. Idempotent (static done flag).
+		installOpRegionV18();
 		
 		bool isprod=false;
 		auto prod=patcher.solveSymbol(index, "__ZN24AppleIntelBaseController5startEP9IOService", address, size);
