@@ -1406,6 +1406,10 @@ private:
 	// firmware enables iGPU display — ports don't exist yet at that stage)
 	static uint32_t ReadRegister32V15(void *that, unsigned long addr);
 	mach_vm_address_t oReadRegister32V15 {};
+	// VLOCAL17 (wsdida GT1): skip setupBootDisplay (it crashes at getPortByDDI==NULL
+	// because ports don't exist without VBT/OpRegion). Caller checks eax==0 to continue.
+	static unsigned int setupBootDisplayV17(AppleIntel::AppleIntelBaseController *that);
+	mach_vm_address_t osetupBootDisplayV17 {};
 	static unsigned long telemetryCreateManagerV10(void *that, unsigned int flag);
 	mach_vm_address_t otelemetryCreateManagerV10 {};
 
