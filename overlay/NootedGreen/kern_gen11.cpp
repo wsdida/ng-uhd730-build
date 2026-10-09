@@ -3666,6 +3666,13 @@ uint64_t Gen11::getOSInformation(AppleIntel::AppleIntelBaseController *that)
 			FB_FLAG_AVOID_FAST_LINK_TRAINING;
 
 		// cameliav=2 (CamelliaTcon2) requires GFX kext present — gate on -ngreentglwithgfx.
+		//
+		// V28: -ngreentglwithgfx is gone from boot-args. It forced cameliav=2, which made
+		// start() walk the CamelliaTcon2 eDP branch for a panel this desktop board does not
+		// have. InitTconSWCommon then failed the "TCON: fvclk" check (mclk/vclk came back 0
+		// from the BIOS VBT tables), the TCON pointer was zeroed and the whole display
+		// pipeline was abandoned. cameliav therefore stays 0 and the driver uses the normal
+		// external-port path, which is what a B760M motherboard actually has.
 		pinfo[1].cameliav = checkKernelArgument("-ngreentglwithgfx") ? 2 : 0;
 		pinfo[1].fMobile  = 1;
 		// 3/3/3 baseline restored. Multi-pipe reduction is whack-a-mole — every count
@@ -3679,13 +3686,28 @@ uint64_t Gen11::getOSInformation(AppleIntel::AppleIntelBaseController *that)
 		pinfo[1].fmaxEuCount  = 8;
 		pinfo[1].fsubslices   = 10;
 
-		// Connector 0: built-in eDP (LVDS), DDI-A, pipe 0
+		// V28 connector 0: primary external port on DDI-A / pipe 0.
+		//
+		// Was ConnectorLVDS with flags 0x8|0x10. 0x8 is CNConnectorAlwaysConnected, which
+		// the header documents as "normally set for LVDS displays (i.e. built-in displays)";
+		// on a hot-pluggable motherboard port it makes the driver treat the monitor as
+		// permanently attached and pick a TCON-less embedded-panel path. Type is now
+		// selectable so the right PHY can be targeted:
+		//   -ngreenport=hdmi  → ConnectorHDMI (0x800)
+		//   -ngreenport=dp    → ConnectorDP   (0x400)   (default)
+		//   -ngreenport=lvds  → ConnectorLVDS (0x2)     (kept for a real eDP panel)
+		uint32_t portType = ConnectorDP;
+		int conn0 = 0;
+		if (PE_parse_boot_argn("ngreenport", &conn0, sizeof(conn0)) && conn0 > 0 && conn0 <= 2)
+			portType = (conn0 == 1) ? ConnectorHDMI : (conn0 == 2 ? ConnectorLVDS : ConnectorDP);
+		uint32_t portFlags = (portType == ConnectorLVDS) ? (0x8 | 0x10)
+			/* external: no always-connected bit */          : (0x1 | 0x400);
 		pinfo[1].connectors[0].index = 0;
 		pinfo[1].connectors[0].busId = 0;
 		pinfo[1].connectors[0].pipe  = 0;
 		pinfo[1].connectors[0].pad   = 0;
-		pinfo[1].connectors[0].type  = ConnectorLVDS;
-		pinfo[1].connectors[0].flags = 0x8 | 0x10;
+		pinfo[1].connectors[0].type  = portType;
+		pinfo[1].connectors[0].flags = portFlags;
 
 		// Connector 1: external USB-C/Thunderbolt DP (TC1/DDI-D), pipe 2
 		pinfo[1].connectors[1].index = 1;
@@ -3699,7 +3721,16 @@ uint64_t Gen11::getOSInformation(AppleIntel::AppleIntelBaseController *that)
 		pinfo[1].connectors[2] = { 2, 2, 2, 0, ConnectorDummy, 0 };
 		pinfo[1].connectors[3] = { 3, 3, 3, 0, ConnectorDummy, 0 };
 
-		SYSLOG("ngreen", "getOSInformation: patched pinfo[1] for ADL-P (LVDS+HDMI, mobile)");
+		SYSLOG("ngreen", "getOSInformation: patched pinfo[1] for ADL-P "
+		       "cameliav=%u port0type=0x%x port0flags=0x%x MCLK=0x%x VCLK=0x%x",
+		       pinfo[1].cameliav, pinfo[1].connectors[0].type, pinfo[1].connectors[0].flags,
+		       pinfo[1].MCLK, pinfo[1].VCLK);
+	// V28 banner: record up front which path this boot can take, so the log alone
+	// tells us whether the Camellia/TCON branch is even reachable.
+	SYSLOG("ngreen", "V28: external-port path — tglwithgfx=%d cameliav=%u port0=0x%x flags=0x%x "
+		       "NGX/panicstall left off; probes V22-V27 active",
+		       checkKernelArgument("-ngreentglwithgfx") ? 1 : 0,
+		       pinfo[1].cameliav, pinfo[1].connectors[0].type, pinfo[1].connectors[0].flags);
 	}
 	return FunctionCast(getOSInformation, callback->ogetOSInformation)(that);
 }
