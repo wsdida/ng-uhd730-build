@@ -3692,10 +3692,11 @@ uint64_t Gen11::getOSInformation(AppleIntel::AppleIntelBaseController *that)
 		// the header documents as "normally set for LVDS displays (i.e. built-in displays)";
 		// on a hot-pluggable motherboard port it makes the driver treat the monitor as
 		// permanently attached and pick a TCON-less embedded-panel path. Type is now
-		// selectable so the right PHY can be targeted:
-		//   -ngreenport=hdmi  → ConnectorHDMI (0x800)
-		//   -ngreenport=dp    → ConnectorDP   (0x400)   (default)
-		//   -ngreenport=lvds  → ConnectorLVDS (0x2)     (kept for a real eDP panel)
+		// selectable so the right PHY can be targeted. The argument is parsed as an
+		// integer (PE_parse_boot_argn takes the key without the leading dash):
+		//   ngreenport=1  → ConnectorHDMI (0x800)   — board HDMI / DisplayPort++
+		//   ngreenport=2  → ConnectorLVDS (0x2)     — kept for a real eDP panel
+		//   absent or 0   → ConnectorDP   (0x400)   — default
 		uint32_t portType = ConnectorDP;
 		int conn0 = 0;
 		if (PE_parse_boot_argn("ngreenport", &conn0, sizeof(conn0)) && conn0 > 0 && conn0 <= 2)
